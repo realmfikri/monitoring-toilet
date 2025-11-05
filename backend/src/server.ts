@@ -1,14 +1,17 @@
 import cors from 'cors';
 import type { CorsOptions } from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
-import fs from 'fs';
-import { promises as fsPromises } from 'fs';
-import path from 'path';
 import rateLimit from 'express-rate-limit';
 import TelegramBot from 'node-telegram-bot-api';
 import { z } from 'zod';
 
 import { appConfig, getConfiguredApiKeys, isAllowedOrigin, isValidApiKey } from './config';
+import { prisma } from './database/prismaClient';
+import { ConfigOverrideRepository } from './repositories/configOverrideRepository';
+import { HistoryRepository } from './repositories/historyRepository';
+import { LatestSnapshotRepository } from './repositories/latestSnapshotRepository';
+import { TelegramSubscriberRepository } from './repositories/telegramSubscriberRepository';
+import type { SnapshotRecord } from './repositories/types';
 
 declare global {
   namespace Express {
@@ -100,25 +103,22 @@ interface TissueSensorData {
 
 const SOAP_DEBOUNCE_MS = 5000;
 const ESP_INACTIVE_THRESHOLD_MS = 30000;
-const HISTORY_LIMIT = 1000;
 
+const latestSnapshotRepository = new LatestSnapshotRepository(prisma);
+const historyRepository = new HistoryRepository(prisma);
+const subscriberRepository = new TelegramSubscriberRepository(prisma);
+const configRepository = new ConfigOverrideRepository(prisma);
 
-const backendRoot = path.resolve(__dirname, '..');
-const defaultDataDir = path.join(backendRoot, 'data');
-const dataDir = process.env.DATA_DIR ? path.resolve(process.cwd(), process.env.DATA_DIR) : defaultDataDir;
-fs.mkdirSync(dataDir, { recursive: true });
-
-const configPath = path.join(dataDir, 'config.json');
-const petugasPath = path.join(dataDir, 'petugas.json');
-
-const DEFAULT_CONFIG = deriveConfig({
+const DEFAULT_CONFIG_BASE: ConfigBase = {
   historicalIntervalMinutes: 5,
   maxReminders: 3,
   reminderIntervalMinutes: 10
-});
+};
 
-let config: Config = loadConfig();
-let petugas: Record<string, PetugasAssignment> = loadPetugas();
+const DEFAULT_CONFIG = deriveConfig(DEFAULT_CONFIG_BASE);
+
+let config: Config = DEFAULT_CONFIG;
+let petugas: Record<string, PetugasAssignment> = {};
 
 const latestData: Record<string, LatestDeviceSnapshot> = {};
 const lastHistoricalSaveTime: Record<string, number> = {};
@@ -217,33 +217,48 @@ const host = process.env.HOST ?? '0.0.0.0';
 const telegramBot = createTelegramBot(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_POLLING === 'false');
 
 if (telegramBot) {
-  telegramBot.on('message', msg => {
+  telegramBot.on('message', async msg => {
     const chatID = msg.chat.id.toString();
     const text = msg.text ?? '';
 
     if (text === '/start') {
-      telegramBot.sendMessage(
-        msg.chat.id,
-        '👋 Selamat datang! Silakan pilih lantai Anda.\nKetik nomor lantai (misal: 1, 2, 3, dst.)'
-      );
+      void telegramBot
+        .sendMessage(msg.chat.id, '👋 Selamat datang! Silakan pilih lantai Anda.\nKetik nomor lantai (misal: 1, 2, 3, dst.)')
+        .catch(error => console.error(`Failed to send /start instructions to ${chatID}`, error));
       return;
     }
 
     if (/^\d+$/.test(text)) {
       const lantai = Number.parseInt(text, 10);
-      petugas[chatID] = { lantai };
-      savePetugas();
-      telegramBot.sendMessage(msg.chat.id, `📍 Anda terdaftar sebagai petugas untuk Lantai ${lantai}.`);
+      try {
+        await subscriberRepository.upsert(chatID, lantai);
+        petugas[chatID] = { lantai };
+        await telegramBot.sendMessage(msg.chat.id, `📍 Anda terdaftar sebagai petugas untuk Lantai ${lantai}.`);
+      } catch (error) {
+        console.error(`Failed to persist Telegram subscription for ${chatID}`, error);
+        void telegramBot
+          .sendMessage(msg.chat.id, '⚠️ Gagal menyimpan pilihan lantai Anda. Silakan coba lagi nanti.')
+          .catch(err => console.error(`Failed to send error notification to ${chatID}`, err));
+      }
       return;
     }
 
     if (text === '/end') {
       if (petugas[chatID]) {
-        delete petugas[chatID];
-        savePetugas();
-        telegramBot.sendMessage(msg.chat.id, 'Terima kasih. Pendaftaran Anda telah diakhiri.');
+        try {
+          await subscriberRepository.delete(chatID);
+          delete petugas[chatID];
+          await telegramBot.sendMessage(msg.chat.id, 'Terima kasih. Pendaftaran Anda telah diakhiri.');
+        } catch (error) {
+          console.error(`Failed to remove Telegram subscription for ${chatID}`, error);
+          void telegramBot
+            .sendMessage(msg.chat.id, '⚠️ Gagal menghapus pendaftaran Anda. Mohon coba lagi nanti.')
+            .catch(err => console.error(`Failed to send unsubscribe error to ${chatID}`, err));
+        }
       } else {
-        telegramBot.sendMessage(msg.chat.id, 'Anda belum terdaftar. Gunakan /start untuk mendaftar.');
+        void telegramBot
+          .sendMessage(msg.chat.id, 'Anda belum terdaftar. Gunakan /start untuk mendaftar.')
+          .catch(error => console.error(`Failed to send not-registered notice to ${chatID}`, error));
       }
       return;
     }
@@ -315,7 +330,7 @@ app.get('/api/config', (_req: Request, res: Response) => {
   });
 });
 
-app.post('/api/config', (req: Request, res: Response) => {
+app.post('/api/config', async (req: Request, res: Response) => {
   const parseResult = configUpdateSchema.safeParse(req.body);
   if (!parseResult.success) {
     res.status(400).json({ error: 'Invalid configuration payload.', details: parseResult.error.flatten() });
@@ -323,14 +338,20 @@ app.post('/api/config', (req: Request, res: Response) => {
   }
 
   const { historicalIntervalMinutes, maxReminders, reminderIntervalMinutes } = parseResult.data;
-
-  config = deriveConfig({
+  const baseConfig: ConfigBase = {
     historicalIntervalMinutes,
     maxReminders,
     reminderIntervalMinutes
-  });
-  saveConfig();
-  res.status(200).json({ status: 'ok' });
+  };
+
+  try {
+    await configRepository.set(baseConfig);
+    config = deriveConfig(baseConfig);
+    res.status(200).json({ status: 'ok' });
+  } catch (error) {
+    console.error('Failed to persist configuration overrides.', error);
+    res.status(500).json({ error: 'Failed to persist configuration overrides.' });
+  }
 });
 
 app.post('/data', requireApiKey, async (req: Request, res: Response) => {
@@ -366,6 +387,13 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
   const status = deviceStatuses[deviceID];
   const lantai = extractFloorFromDeviceID(deviceID);
+
+  const latestSnapshotRecord = toSnapshotRecord(latestData[deviceID]);
+  try {
+    await latestSnapshotRepository.upsert(latestSnapshotRecord);
+  } catch (error) {
+    console.error(`[Latest Snapshot] Failed to persist data for ${deviceID}`, error);
+  }
 
   const amonia = parseJson<AmmoniaSensorData>(normalized.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' });
   const soap = parseJson<SoapSensorData>(normalized.sabun, defaultSoapData());
@@ -417,18 +445,11 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
   const lastSave = lastHistoricalSaveTime[deviceID] ?? 0;
   if (now - lastSave > config.historicalIntervalMs) {
-    const history = await readHistoryFile(deviceID);
-    const dataToPersist = latestData[deviceID];
-    history.push(dataToPersist);
-    while (history.length > HISTORY_LIMIT) {
-      history.shift();
-    }
-
     try {
-      await fsPromises.writeFile(getHistoryFilePath(deviceID), JSON.stringify(history, null, 2));
+      await historyRepository.record(latestSnapshotRecord);
       lastHistoricalSaveTime[deviceID] = now;
       if (!isAlerting) {
-        sendTelegramAlert(telegramBot, deviceID, dataToPersist, lantai, [], 'routine');
+        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'routine');
       }
     } catch (err) {
       console.error(`[Historical Log] Failed to write data for ${deviceID}`, err);
@@ -438,26 +459,31 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
   res.status(200).send(`Data from ${deviceID} received successfully.`);
 });
 
-app.get('/api/latest', (_req: Request, res: Response) => {
+app.get('/api/latest', async (_req: Request, res: Response) => {
   const now = Date.now();
+  const updates: Promise<void>[] = [];
+
   Object.values(latestData).forEach(entry => {
-    if (now - entry.lastActive > ESP_INACTIVE_THRESHOLD_MS) {
+    if (now - entry.lastActive > ESP_INACTIVE_THRESHOLD_MS && entry.espStatus !== 'inactive') {
       entry.espStatus = 'inactive';
+      updates.push(latestSnapshotRepository.updateStatus(entry.deviceID, 'inactive'));
     }
   });
+
+  if (updates.length > 0) {
+    await Promise.allSettled(updates);
+  }
 
   res.json(latestData);
 });
 
 app.get('/api/history', async (_req: Request, res: Response) => {
   try {
-    const files = await fsPromises.readdir(dataDir);
-    const historyFiles = files.filter(file => file.startsWith('history_') && file.endsWith('.json'));
+    const groupedHistory = await historyRepository.findAllGrouped();
     const allHistory: Record<string, LatestDeviceSnapshot[]> = {};
 
-    for (const file of historyFiles) {
-      const deviceID = file.replace('history_', '').replace('.json', '');
-      allHistory[deviceID] = await readHistoryFile(deviceID);
+    for (const [deviceId, entries] of groupedHistory.entries()) {
+      allHistory[deviceId] = entries.map(toLatestDeviceSnapshot);
     }
 
     res.json(allHistory);
@@ -475,10 +501,17 @@ app.use((err: Error, _req: Request, res: Response, next: NextFunction) => {
   next(err);
 });
 
-app.listen(port, host, () => {
-  console.log(`Server is running at http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`);
-  console.log('Waiting for data from ESP32s...');
-});
+bootstrap()
+  .then(() => {
+    app.listen(port, host, () => {
+      console.log(`Server is running at http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`);
+      console.log('Waiting for data from ESP32s...');
+    });
+  })
+  .catch(error => {
+    console.error('Failed to initialize the server.', error);
+    process.exit(1);
+  });
 
 function deriveConfig(input: ConfigBase): Config {
   return {
@@ -487,53 +520,6 @@ function deriveConfig(input: ConfigBase): Config {
     reminderIntervalMs: input.reminderIntervalMinutes * 60 * 1000,
     maxAlertDurationMs: input.maxReminders * input.reminderIntervalMinutes * 60 * 1000
   };
-}
-
-function loadConfig(): Config {
-  try {
-    const raw = fs.readFileSync(configPath, 'utf8');
-    const parsed = JSON.parse(raw) as Partial<ConfigBase>;
-    return deriveConfig({
-      historicalIntervalMinutes: parsed?.historicalIntervalMinutes ?? DEFAULT_CONFIG.historicalIntervalMinutes,
-      maxReminders: parsed?.maxReminders ?? DEFAULT_CONFIG.maxReminders,
-      reminderIntervalMinutes: parsed?.reminderIntervalMinutes ?? DEFAULT_CONFIG.reminderIntervalMinutes
-    });
-  } catch (error) {
-    console.log('File config.json tidak ditemukan atau rusak, menggunakan default.');
-    const baseConfig: ConfigBase = {
-      historicalIntervalMinutes: DEFAULT_CONFIG.historicalIntervalMinutes,
-      maxReminders: DEFAULT_CONFIG.maxReminders,
-      reminderIntervalMinutes: DEFAULT_CONFIG.reminderIntervalMinutes
-    };
-    try {
-      fs.writeFileSync(configPath, JSON.stringify(baseConfig, null, 2));
-    } catch (err) {
-      console.error('Gagal menulis config default:', err);
-    }
-    return deriveConfig(baseConfig);
-  }
-}
-
-function saveConfig() {
-  const base: ConfigBase = {
-    historicalIntervalMinutes: config.historicalIntervalMinutes,
-    maxReminders: config.maxReminders,
-    reminderIntervalMinutes: config.reminderIntervalMinutes
-  };
-  fs.writeFileSync(configPath, JSON.stringify(base, null, 2));
-}
-
-function loadPetugas(): Record<string, PetugasAssignment> {
-  try {
-    const raw = fs.readFileSync(petugasPath, 'utf8');
-    return JSON.parse(raw) as Record<string, PetugasAssignment>;
-  } catch {
-    return {};
-  }
-}
-
-function savePetugas() {
-  fs.writeFileSync(petugasPath, JSON.stringify(petugas, null, 2));
 }
 
 function normalizeSensorPayload(payload: RawSensorPayload): Omit<LatestDeviceSnapshot, 'timestamp' | 'espStatus' | 'lastActive'> {
@@ -570,6 +556,32 @@ function extractFloorFromDeviceID(deviceID: string): number {
     }
   }
   return 0;
+}
+
+function toSnapshotRecord(snapshot: LatestDeviceSnapshot): SnapshotRecord {
+  return {
+    deviceId: snapshot.deviceID,
+    amonia: snapshot.amonia,
+    air: snapshot.air,
+    sabun: snapshot.sabun,
+    tisu: snapshot.tisu,
+    timestamp: new Date(snapshot.timestamp),
+    espStatus: snapshot.espStatus === 'inactive' ? 'inactive' : 'active',
+    lastActive: new Date(snapshot.lastActive)
+  };
+}
+
+function toLatestDeviceSnapshot(record: SnapshotRecord): LatestDeviceSnapshot {
+  return {
+    deviceID: record.deviceId,
+    amonia: record.amonia,
+    air: record.air,
+    sabun: record.sabun,
+    tisu: record.tisu,
+    timestamp: record.timestamp.toISOString(),
+    espStatus: record.espStatus,
+    lastActive: record.lastActive.getTime()
+  };
 }
 
 function getActiveAlerts(deviceID: string, soapStatusConfirmed: SoapStatus, tissueRaw: string): string[] {
@@ -689,21 +701,42 @@ function defaultTissueData(): TissueSensorData {
   };
 }
 
-async function readHistoryFile(deviceID: string): Promise<LatestDeviceSnapshot[]> {
-  const historyPath = getHistoryFilePath(deviceID);
+async function bootstrap(): Promise<void> {
   try {
-    const raw = await fsPromises.readFile(historyPath, 'utf8');
-    return JSON.parse(raw) as LatestDeviceSnapshot[];
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error(`Failed to read history for ${deviceID}`, error);
-    }
-    return [];
-  }
-}
+    const storedConfig = await configRepository.get();
+    config = deriveConfig(storedConfig ?? DEFAULT_CONFIG_BASE);
 
-function getHistoryFilePath(deviceID: string): string {
-  return path.join(dataDir, `history_${deviceID}.json`);
+    const subscribers = await subscriberRepository.list();
+    petugas = {};
+    subscribers.forEach(subscriber => {
+      petugas[subscriber.chatId] = { lantai: subscriber.lantai };
+    });
+
+    const snapshots = await latestSnapshotRepository.findAll();
+    const now = Date.now();
+    const statusUpdates: Promise<void>[] = [];
+
+    snapshots.forEach(record => {
+      const snapshot = toLatestDeviceSnapshot(record);
+      if (now - snapshot.lastActive > ESP_INACTIVE_THRESHOLD_MS && snapshot.espStatus !== 'inactive') {
+        snapshot.espStatus = 'inactive';
+        statusUpdates.push(latestSnapshotRepository.updateStatus(record.deviceId, 'inactive'));
+      }
+      latestData[record.deviceId] = snapshot;
+    });
+
+    if (statusUpdates.length > 0) {
+      await Promise.allSettled(statusUpdates);
+    }
+
+    const historyTimestamps = await historyRepository.getLatestTimestamps();
+    Object.entries(historyTimestamps).forEach(([deviceId, timestamp]) => {
+      lastHistoricalSaveTime[deviceId] = timestamp.getTime();
+    });
+  } catch (error) {
+    console.error('Bootstrap initialization failed.', error);
+    throw error;
+  }
 }
 
 function createTelegramBot(token: string | undefined, disablePolling: boolean): TelegramBot | null {

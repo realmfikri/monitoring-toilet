@@ -1,6 +1,7 @@
 node_modules/
 backend/node_modules/
 backend/dist/
+backend/data/
 *.log
 .DS_Store
 
