@@ -1,5 +1,118 @@
 # Toilet Monitoring Backend Runbook
 
+## VPS deployment quickstart (manual runbook)
+The following checklist assumes a fresh Ubuntu 22.04 VPS at `103.126.116.102`, a non-root deploy user (e.g. `deploy`), and Cloudflare already fronting the public DNS records. Each step mirrors what the CI/CD workflow automates; follow it verbatim when bootstrapping a new machine or re-provisioning after disaster recovery.
+
+1. **Harden the host**
+   ```bash
+   sudo apt update && sudo apt upgrade -y
+   sudo apt install -y ufw fail2ban git build-essential nginx certbot python3-certbot-dns-cloudflare nodejs npm postgresql-client
+   sudo ufw allow OpenSSH
+   sudo ufw enable
+   sudo systemctl enable --now fail2ban
+   ```
+   - Import the latest Cloudflare IP ranges into UFW if you intend to restrict HTTP/S traffic to Cloudflare only.
+   - Add your SSH public key to `/home/deploy/.ssh/authorized_keys`; disable password login in `/etc/ssh/sshd_config`.
+
+2. **Prepare project directories and environment files**
+   ```bash
+   sudo mkdir -p /opt/toilet
+   sudo chown deploy:deploy /opt/toilet
+   git clone https://github.com/<your-org>/monitoring-toilet.git /opt/toilet
+   cd /opt/toilet
+   cp env.example .env.production
+   cp env.example .env.development
+   ```
+   - Populate `.env.production` and `.env.development` with real secrets (API keys, database URL, Telegram token, Cloudflare AOP toggle, etc.).
+   - For production, set `PORT=3000`, `VITE_API_BASE_URL=https://toilet-api.muhamadfikri.com`, and add comma-separated keys to `API_KEYS_PRODUCTION`.
+
+3. **Install dependencies and build artifacts**
+   ```bash
+   npm --prefix backend ci
+   npm --prefix backend run build
+   npm --prefix frontend ci
+   npm --prefix frontend run build
+   ```
+   - `frontend/dist/` now contains the static dashboard consumed by Nginx.
+
+4. **Run database migrations**
+   ```bash
+   cd /opt/toilet/backend
+   PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1 npx prisma migrate deploy
+   PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1 npx prisma generate
+   ```
+   - Verify connectivity with `psql "$DATABASE_URL" -c 'select 1;'`.
+
+5. **Configure process managers**
+   - Create a PM2 ecosystem file at `/opt/toilet/ecosystem.config.cjs` (or use systemd units) with four apps:
+     - `toilet-api` → `node dist/server.js` with `PORT=3000` and `.env.production`.
+     - `toilet-api-dev` → `node dist/server.js` with `PORT=3300` and `.env.development`.
+     - `toilet-app` → `serve frontend/dist` on port `4173` (use `npm install -g serve`).
+     - `toilet-app-dev` → `npm run dev -- --host --port 5173` for live previews.
+   - Start them via `pm2 start ecosystem.config.cjs && pm2 save`.
+
+6. **Install Nginx reverse proxy**
+   ```bash
+   sudo cp infra/nginx/toilet.conf /etc/nginx/sites-available/toilet.conf
+   sudo ln -sf /etc/nginx/sites-available/toilet.conf /etc/nginx/sites-enabled/toilet.conf
+   sudo mkdir -p /etc/nginx/snippets
+   sudo cp infra/nginx/snippets/ssl-params.conf /etc/nginx/snippets/ssl-params.conf
+   sudo mkdir -p /etc/nginx/certs
+   sudo cp /path/to/cloudflare-origin-pull-ca.pem /etc/nginx/certs/cloudflare-origin-pull-ca.pem
+   sudo nginx -t
+   sudo systemctl reload nginx
+   ```
+   - Update upstream ports in `toilet.conf` if you changed the PM2 bindings.
+
+7. **Issue TLS certificates (Cloudflare DNS-01)**
+   ```bash
+   sudo mkdir -p /root/.secrets/certbot
+   sudo chmod 700 /root/.secrets/certbot
+   sudo tee /root/.secrets/certbot/cloudflare.ini <<'EOF'
+   dns_cloudflare_api_token = <cloudflare_api_token>
+   EOF
+   sudo chmod 600 /root/.secrets/certbot/cloudflare.ini
+   sudo certbot certonly \
+     --dns-cloudflare \
+     --dns-cloudflare-credentials /root/.secrets/certbot/cloudflare.ini \
+     -d toilet-api.muhamadfikri.com \
+     -d toilet-app.muhamadfikri.com \
+     -d toilet-api-dev.muhamadfikri.com \
+     -d toilet-app-dev.muhamadfikri.com
+   sudo systemctl enable --now cert-renewal.timer
+   ```
+   - Certbot hooks in `infra/nginx/systemd` reload Nginx after renewal.
+
+8. **Verify Cloudflare integration**
+   - Confirm DNS `A` records for the four subdomains proxy to the VPS.
+   - Ensure SSL mode is **Full (strict)**, Always HTTPS is **ON**, and HSTS is active.
+   - For API subdomains, configure Cache Rules to bypass caching; enable WAF managed rules and rate limits.
+
+9. **Smoke test**
+   ```bash
+   curl -i https://toilet-api.muhamadfikri.com/healthz
+   curl -i https://toilet-api-dev.muhamadfikri.com/healthz
+   curl -I https://toilet-app.muhamadfikri.com/
+   curl -I https://toilet-app-dev.muhamadfikri.com/
+   ```
+   - Review PM2 logs (`pm2 logs --lines 100`) and Nginx logs for errors.
+
+10. **Enable CI/CD (optional once manual bootstrap is done)**
+    - Populate GitHub environment secrets (`DEV_*`, `PROD_*`) with SSH credentials and healthcheck URLs.
+    - Allow the deploy workflows to run; subsequent pushes to `dev` and `main` will follow the same sequence automatically.
+
+11. **Schedule backups**
+    ```bash
+    sudo crontab -u deploy -e
+    # Append
+    30 2 * * * BACKUP_BUCKET=s3://toilet-monitoring-backups \ 
+      DATABASE_URL=postgresql://user:pass@127.0.0.1:5432/toilet \ 
+      /opt/toilet/scripts/backup.sh >> /var/log/toilet-backup.log 2>&1
+    ```
+    - Export `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` in `/home/deploy/.profile` or use an IAM role.
+
+Proceed to the detailed sections below for ongoing operations, incident response, and recovery drills.
+
 ## Environment Variables
 The following variables are required for a healthy deployment. Defaults come from `env.example`; override them per environment using GitHub Action secrets or `/etc/toilet-monitoring/.env` on the servers.
 
