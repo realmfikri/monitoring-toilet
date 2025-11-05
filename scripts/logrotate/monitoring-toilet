@@ -1,0 +1,13 @@
+/var/log/monitoring-toilet/*.log {
+  daily
+  rotate 14
+  compress
+  delaycompress
+  missingok
+  notifempty
+  sharedscripts
+  create 0640 root root
+  postrotate
+    systemctl kill -s USR1 monitoring-toilet.service 2>/dev/null || true
+  endscript
+}
