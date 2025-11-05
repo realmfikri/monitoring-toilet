@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 
 import { ConfigOverrideRecord } from './types';
 
@@ -20,6 +20,10 @@ export class ConfigOverrideRepository {
       return null;
     }
 
+    if (typeof row.value !== 'object' || row.value === null || Array.isArray(row.value)) {
+      return null;
+    }
+
     const raw = row.value as Record<string, unknown>;
     const historical = parseNumber(raw.historicalIntervalMinutes);
     const reminders = parseNumber(raw.maxReminders);
@@ -37,12 +41,18 @@ export class ConfigOverrideRepository {
   }
 
   async set(config: ConfigOverrideRecord): Promise<void> {
+    const serializedConfig: Prisma.JsonObject = {
+      historicalIntervalMinutes: config.historicalIntervalMinutes,
+      maxReminders: config.maxReminders,
+      reminderIntervalMinutes: config.reminderIntervalMinutes
+    };
+
     await this.prisma.configOverride.upsert({
       where: { key: CONFIG_KEY },
-      update: { value: config },
+      update: { value: serializedConfig },
       create: {
         key: CONFIG_KEY,
-        value: config
+        value: serializedConfig
       }
     });
   }
