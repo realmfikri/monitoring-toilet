@@ -1,0 +1,210 @@
+name: Deploy Prod
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Mark deployment start
+        id: start_timer
+        run: echo "timestamp=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci --no-audit --no-fund
+
+      - name: Build backend
+        working-directory: backend
+        run: npm run build
+
+      - name: Upload backend build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-backend-dist
+          path: backend/dist
+          if-no-files-found: error
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Upload frontend build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+
+      - name: Deploy over SSH
+        id: remote_deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            if [ -z "${{ secrets.PROD_PROJECT_PATH }}" ]; then
+              echo "PROD_PROJECT_PATH secret is required" >&2
+              exit 1
+            fi
+            cd "${{ secrets.PROD_PROJECT_PATH }}"
+            git fetch origin "${{ github.ref_name }}"
+            git checkout "${{ github.ref_name }}"
+            git reset --hard "${{ github.sha }}"
+            cd backend
+            npm ci --omit=dev --no-audit --no-fund
+            npm run build
+            npx prisma migrate deploy
+            cd ..
+            cd frontend
+            npm ci --omit=dev --no-audit --no-fund
+            npm run build
+            cd ..
+            sudo systemctl restart toilet-api
+            if command -v pm2 >/dev/null 2>&1 && pm2 describe toilet-app >/dev/null 2>&1; then
+              pm2 restart toilet-app
+            else
+              sudo systemctl restart toilet-app
+            fi
+
+      - name: Run health check
+        id: health_check
+        continue-on-error: true
+        env:
+          HEALTHCHECK_URL: ${{ secrets.PROD_HEALTHCHECK_URL }}
+        run: |
+          start=$(date +%s)
+          if [ -z "$HEALTHCHECK_URL" ]; then
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "message=PROD_HEALTHCHECK_URL is not configured" >> "$GITHUB_OUTPUT"
+            echo "duration=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if body=$(curl -fsS --retry 3 --retry-delay 5 --max-time 15 "$HEALTHCHECK_URL"); then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "body<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$body" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+            code=0
+          else
+            code=$?
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "message=Health check failed with exit code $code" >> "$GITHUB_OUTPUT"
+          fi
+          end=$(date +%s)
+          echo "duration=$(( end - start ))" >> "$GITHUB_OUTPUT"
+          exit $code
+
+      - name: Fail on unhealthy service
+        if: steps.health_check.outcome == 'failure'
+        run: |
+          echo "Health check failed: ${{ steps.health_check.outputs.message }}" >&2
+          exit 1
+
+      - name: Mark deployment end
+        if: always()
+        id: end_timer
+        env:
+          START: ${{ steps.start_timer.outputs.timestamp }}
+        run: |
+          end=$(date +%s)
+          if [ -n "$START" ]; then
+            echo "duration=$(( end - START ))" >> "$GITHUB_OUTPUT"
+          else
+            echo "duration=0" >> "$GITHUB_OUTPUT"
+          fi
+          echo "timestamp=$end" >> "$GITHUB_OUTPUT"
+
+      - name: Publish deployment summary
+        if: always()
+        env:
+          DEPLOY_DURATION: ${{ steps.end_timer.outputs.duration }}
+          HEALTH_STATUS: ${{ steps.health_check.outputs.status }}
+          HEALTH_DURATION: ${{ steps.health_check.outputs.duration }}
+          HEALTH_MESSAGE: ${{ steps.health_check.outputs.message }}
+        run: |
+          case "$HEALTH_STATUS" in
+            pass)
+              icon="✅"
+              status_label="Healthy"
+              ;;
+            *)
+              icon="❌"
+              status_label="Failed"
+              ;;
+          esac
+          {
+            echo "## Production Deployment"
+            echo "- Commit: ${{ github.sha }}"
+            if [ -n "$DEPLOY_DURATION" ]; then
+              echo "- Total duration: ${DEPLOY_DURATION}s"
+            fi
+            if [ -n "$HEALTH_STATUS" ]; then
+              if [ -n "$HEALTH_DURATION" ]; then
+                echo "- Health check: $icon ${status_label} (response ${HEALTH_DURATION}s)"
+              else
+                echo "- Health check: $icon ${status_label}"
+              fi
+            fi
+            if [ -n "$HEALTH_MESSAGE" ]; then
+              echo "- Notes: $HEALTH_MESSAGE"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on PR with deployment summary
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        env:
+          DEPLOY_DURATION: ${{ steps.end_timer.outputs.duration }}
+          HEALTH_STATUS: ${{ steps.health_check.outputs.status }}
+          HEALTH_DURATION: ${{ steps.health_check.outputs.duration }}
+          HEALTH_MESSAGE: ${{ steps.health_check.outputs.message }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const icon = process.env.HEALTH_STATUS === 'pass' ? '✅' : '❌';
+            const duration = process.env.DEPLOY_DURATION ? `${process.env.DEPLOY_DURATION}s` : 'n/a';
+            const healthDuration = process.env.HEALTH_DURATION ? `${process.env.HEALTH_DURATION}s` : 'n/a';
+            const notes = process.env.HEALTH_MESSAGE ? `\n- Notes: ${process.env.HEALTH_MESSAGE}` : '';
+            const body = `## Production Deployment\n- Commit: ${context.sha}\n- Total duration: ${duration}\n- Health check: ${icon} (${healthDuration})${notes}`;
+            if (context.eventName === 'pull_request') {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body
+              });
+            }

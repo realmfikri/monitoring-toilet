@@ -25,6 +25,28 @@ PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1 npx prisma generate
    npm run start
    ```
 
+### Deployment automation & secrets
+- GitHub Actions handles dev (`deploy-dev.yml`) and production (`deploy-prod.yml`) rollouts.
+- Configure dedicated environments in GitHub (`Settings` → `Environments`) with **separate** secrets for each stage:
+  - Dev: `DEV_SSH_HOST`, `DEV_SSH_USER`, `DEV_SSH_KEY`, `DEV_PROJECT_PATH`, `DEV_HEALTHCHECK_URL`.
+  - Prod: `PROD_SSH_HOST`, `PROD_SSH_USER`, `PROD_SSH_KEY`, `PROD_PROJECT_PATH`, `PROD_HEALTHCHECK_URL`.
+- Store the SSH keys as PEM-formatted private keys. Use read-only deploy accounts on the VPS whenever possible.
+- Keep environment-specific variables (database URLs, tokens, PM2 ecosystem configs) scoped to their respective environment to avoid accidental cross-stage leakage.
+
+### Rollback procedures
+If a deploy introduces regressions, revert to the previous healthy commit:
+
+```bash
+# Identify the previous commit from the CI summary or git log
+ssh <dev-user>@<dev-host> 'cd /opt/toilet && git checkout <sha> && sudo systemctl restart toilet-api-dev && pm2 restart toilet-app-dev'
+
+ssh <prod-user>@<prod-host> 'cd /opt/toilet && git checkout <sha> && sudo systemctl restart toilet-api && pm2 restart toilet-app'
+```
+
+- Use `git reflog` or the GitHub deployment summaries to pick the last known-good SHA.
+- After rolling back, monitor `/healthz` and functional telemetry to confirm recovery.
+- Remember to follow up with a forward-fix (new commit) so the main branch reflects the hotfix applied in production.
+
 ## Backups
 ### Nightly backup job
 - Script: `scripts/backup.sh`
