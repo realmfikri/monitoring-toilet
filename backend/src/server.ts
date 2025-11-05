@@ -1,10 +1,22 @@
 import cors from 'cors';
-import dotenv from 'dotenv';
-import express, { Request, Response } from 'express';
+import type { CorsOptions } from 'cors';
+import express, { NextFunction, Request, Response } from 'express';
 import fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import path from 'path';
+import rateLimit from 'express-rate-limit';
 import TelegramBot from 'node-telegram-bot-api';
+import { z } from 'zod';
+
+import { appConfig, getConfiguredApiKeys, isAllowedOrigin, isValidApiKey } from './config';
+
+declare global {
+  namespace Express {
+    interface Request {
+      clientIp?: string;
+    }
+  }
+}
 
 type EspStatus = 'active' | 'inactive';
 type SoapStatus = 'safe' | 'pending' | 'critical';
@@ -26,13 +38,15 @@ interface PetugasAssignment {
   lantai: number;
 }
 
-interface RawSensorPayload {
-  deviceID: string;
-  amonia: unknown;
-  air: unknown;
-  sabun: unknown;
-  tisu: unknown;
-}
+const rawSensorPayloadSchema = z.object({
+  deviceID: z.string().trim().min(1, 'deviceID is required'),
+  amonia: z.unknown().optional(),
+  air: z.unknown().optional(),
+  sabun: z.unknown().optional(),
+  tisu: z.unknown().optional()
+});
+
+type RawSensorPayload = z.infer<typeof rawSensorPayloadSchema>;
 
 interface LatestDeviceSnapshot {
   deviceID: string;
@@ -88,14 +102,6 @@ const SOAP_DEBOUNCE_MS = 5000;
 const ESP_INACTIVE_THRESHOLD_MS = 30000;
 const HISTORY_LIMIT = 1000;
 
-const nodeEnv = process.env.NODE_ENV || 'development';
-const envFileName = `.env.${nodeEnv}`;
-const envFilePath = path.resolve(process.cwd(), envFileName);
-if (fs.existsSync(envFilePath)) {
-  dotenv.config({ path: envFilePath });
-} else {
-  dotenv.config();
-}
 
 const backendRoot = path.resolve(__dirname, '..');
 const defaultDataDir = path.join(backendRoot, 'data');
@@ -118,18 +124,92 @@ const latestData: Record<string, LatestDeviceSnapshot> = {};
 const lastHistoricalSaveTime: Record<string, number> = {};
 const deviceStatuses: Record<string, DeviceStatus> = {};
 
-const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? '')
-  .split(',')
-  .map(origin => origin.trim())
-  .filter(origin => origin.length > 0);
-
 const app = express();
-app.use(
-  cors({
-    origin: allowedOrigins.length > 0 ? allowedOrigins : '*'
-  })
-);
-app.use(express.json());
+
+const configuredApiKeys = getConfiguredApiKeys();
+if (configuredApiKeys.length === 0) {
+  console.warn('No API keys configured. The /data endpoint will reject all submissions.');
+} else {
+  console.log(`Loaded ${configuredApiKeys.length} API key(s) for ${appConfig.environment} environment.`);
+}
+
+app.set('trust proxy', appConfig.trustProxy);
+
+const corsOptions: CorsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) {
+      if (appConfig.allowRequestsWithoutOrigin) {
+        callback(null, true);
+      } else {
+        callback(new Error('Origin header is required.'));
+      }
+      return;
+    }
+
+    if (isAllowedOrigin(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Origin ${origin} is not allowed.`));
+  },
+  credentials: true
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+const cloudflareAuthMiddleware: express.RequestHandler = (req, res, next) => {
+  const cfConnectingIpHeader = req.headers['cf-connecting-ip'];
+
+  if (Array.isArray(cfConnectingIpHeader)) {
+    req.clientIp = cfConnectingIpHeader[0];
+  } else if (typeof cfConnectingIpHeader === 'string' && cfConnectingIpHeader.trim().length > 0) {
+    req.clientIp = cfConnectingIpHeader.trim();
+  }
+
+  if (req.clientIp) {
+    req.headers['x-forwarded-for'] = req.clientIp;
+  } else if (!appConfig.requireCloudflareAuth) {
+    req.clientIp = req.ip;
+  }
+
+  if (appConfig.requireCloudflareAuth && !req.clientIp) {
+    res.status(403).json({ error: 'Requests must pass through Cloudflare Authenticated Origin Pulls.' });
+    return;
+  }
+
+  next();
+};
+
+app.use(cloudflareAuthMiddleware);
+
+const requestRateLimiter = rateLimit({
+  windowMs: appConfig.rateLimit.windowMs,
+  max: appConfig.rateLimit.max,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: req => req.clientIp ?? req.ip ?? req.socket.remoteAddress ?? 'unknown',
+  message: 'Too many requests. Please try again later.'
+});
+
+app.use(requestRateLimiter);
+app.use(express.json({ limit: '1mb' }));
+
+const configUpdateSchema = z.object({
+  historicalIntervalMinutes: z.coerce.number().int().min(1, 'historicalIntervalMinutes must be an integer >= 1.'),
+  maxReminders: z.coerce.number().int().min(0, 'maxReminders must be an integer >= 0.'),
+  reminderIntervalMinutes: z.coerce.number().int().min(1, 'reminderIntervalMinutes must be an integer >= 1.')
+});
+
+const requireApiKey: express.RequestHandler = (req, res, next) => {
+  const apiKey = req.get('x-api-key');
+  if (!isValidApiKey(apiKey)) {
+    res.status(401).json({ error: 'Invalid API key.' });
+    return;
+  }
+  next();
+};
 
 const port = Number.parseInt(process.env.PORT ?? '3000', 10);
 const host = process.env.HOST ?? '0.0.0.0';
@@ -236,44 +316,32 @@ app.get('/api/config', (_req: Request, res: Response) => {
 });
 
 app.post('/api/config', (req: Request, res: Response) => {
-  const { historicalIntervalMinutes, maxReminders, reminderIntervalMinutes } = req.body ?? {};
-
-  const historicalInterval = Number.parseInt(historicalIntervalMinutes, 10);
-  const reminders = Number.parseInt(maxReminders, 10);
-  const reminderInterval = Number.parseInt(reminderIntervalMinutes, 10);
-
-  if (Number.isNaN(historicalInterval) || historicalInterval < 1) {
-    res.status(400).send('historicalIntervalMinutes must be an integer >= 1.');
+  const parseResult = configUpdateSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    res.status(400).json({ error: 'Invalid configuration payload.', details: parseResult.error.flatten() });
     return;
   }
 
-  if (Number.isNaN(reminders) || reminders < 0) {
-    res.status(400).send('maxReminders must be an integer >= 0.');
-    return;
-  }
-
-  if (Number.isNaN(reminderInterval) || reminderInterval < 1) {
-    res.status(400).send('reminderIntervalMinutes must be an integer >= 1.');
-    return;
-  }
+  const { historicalIntervalMinutes, maxReminders, reminderIntervalMinutes } = parseResult.data;
 
   config = deriveConfig({
-    historicalIntervalMinutes: historicalInterval,
-    maxReminders: reminders,
-    reminderIntervalMinutes: reminderInterval
+    historicalIntervalMinutes,
+    maxReminders,
+    reminderIntervalMinutes
   });
   saveConfig();
-  res.status(200).send('Konfigurasi berhasil disimpan.');
+  res.status(200).json({ status: 'ok' });
 });
 
-app.post('/data', async (req: Request, res: Response) => {
-  const payload = req.body as RawSensorPayload;
-  const deviceID = String(payload.deviceID ?? '').trim();
-
-  if (!deviceID) {
-    res.status(400).send('Device ID is missing.');
+app.post('/data', requireApiKey, async (req: Request, res: Response) => {
+  const parseResult = rawSensorPayloadSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    res.status(400).json({ error: 'Invalid sensor payload.', details: parseResult.error.flatten() });
     return;
   }
+
+  const payload = parseResult.data;
+  const deviceID = payload.deviceID;
 
   const now = Date.now();
   const normalized = normalizeSensorPayload(payload);
@@ -397,6 +465,14 @@ app.get('/api/history', async (_req: Request, res: Response) => {
     console.error('Error reading historical data:', error);
     res.status(500).send('No historical data available.');
   }
+});
+
+app.use((err: Error, _req: Request, res: Response, next: NextFunction) => {
+  if (err.message === 'Origin header is required.' || err.message.includes('is not allowed')) {
+    res.status(403).json({ error: err.message });
+    return;
+  }
+  next(err);
 });
 
 app.listen(port, host, () => {
