@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EspStatus {
+  active
+  inactive
+}
+
+model DeviceLatestSnapshot {
+  deviceId   String       @id
+  amonia     String?
+  air        String?
+  sabun      String?
+  tisu       String?
+  timestamp  DateTime
+  espStatus  EspStatus
+  lastActive DateTime
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  histories  DeviceHistory[]
+}
+
+model DeviceHistory {
+  id         BigInt     @id @default(autoincrement())
+  deviceId   String
+  amonia     String?
+  air        String?
+  sabun      String?
+  tisu       String?
+  timestamp  DateTime   @default(now())
+  espStatus  EspStatus
+  lastActive DateTime
+  createdAt  DateTime   @default(now())
+
+  device DeviceLatestSnapshot @relation(fields: [deviceId], references: [deviceId], onDelete: Cascade)
+
+  @@index([deviceId, timestamp])
+}
+
+model TelegramSubscriber {
+  chatId    String   @id
+  lantai    Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ConfigOverride {
+  key       String   @id
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -1,9 +1,0 @@
-{
-  "historicalIntervalMinutes": 9,
-  "maxReminders": 10,
-  "reminderIntervalMinutes": 3,
-  "historicalIntervalMs": 540000,
-  "reminderIntervalMs": 180000,
-  "maxAlertDurationMs": 1800000,
-  "intervalMs": 300000
-}
