@@ -1,12 +1,16 @@
+import { randomUUID } from 'node:crypto';
 import cors from 'cors';
 import type { CorsOptions } from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import TelegramBot from 'node-telegram-bot-api';
+import pinoHttp from 'pino-http';
+import type { Logger } from 'pino';
 import { z } from 'zod';
 
 import { appConfig, getConfiguredApiKeys, isAllowedOrigin, isValidApiKey } from './config';
 import { prisma } from './database/prismaClient';
+import { accessLogger, appLogger } from './logger';
 import { ConfigOverrideRepository } from './repositories/configOverrideRepository';
 import { HistoryRepository } from './repositories/historyRepository';
 import { LatestSnapshotRepository } from './repositories/latestSnapshotRepository';
@@ -17,6 +21,7 @@ declare global {
   namespace Express {
     interface Request {
       clientIp?: string;
+      requestId: string;
     }
   }
 }
@@ -128,9 +133,9 @@ const app = express();
 
 const configuredApiKeys = getConfiguredApiKeys();
 if (configuredApiKeys.length === 0) {
-  console.warn('No API keys configured. The /data endpoint will reject all submissions.');
+  appLogger.warn('No API keys configured. The /data endpoint will reject all submissions.');
 } else {
-  console.log(`Loaded ${configuredApiKeys.length} API key(s) for ${appConfig.environment} environment.`);
+  appLogger.info({ environment: appConfig.environment, apiKeys: configuredApiKeys.length }, 'API keys loaded');
 }
 
 app.set('trust proxy', appConfig.trustProxy);
@@ -159,22 +164,72 @@ const corsOptions: CorsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-const cloudflareAuthMiddleware: express.RequestHandler = (req, res, next) => {
+const requestMetadataMiddleware: express.RequestHandler = (req, _res, next) => {
   const cfConnectingIpHeader = req.headers['cf-connecting-ip'];
+  let clientIp: string | undefined;
 
   if (Array.isArray(cfConnectingIpHeader)) {
-    req.clientIp = cfConnectingIpHeader[0];
-  } else if (typeof cfConnectingIpHeader === 'string' && cfConnectingIpHeader.trim().length > 0) {
-    req.clientIp = cfConnectingIpHeader.trim();
+    clientIp = cfConnectingIpHeader[0];
+  } else if (typeof cfConnectingIpHeader === 'string') {
+    clientIp = cfConnectingIpHeader.split(',')[0]?.trim();
   }
 
-  if (req.clientIp) {
-    req.headers['x-forwarded-for'] = req.clientIp;
-  } else if (!appConfig.requireCloudflareAuth) {
-    req.clientIp = req.ip;
+  if (!clientIp && !appConfig.requireCloudflareAuth) {
+    clientIp = req.ip;
   }
 
+  if (clientIp) {
+    req.clientIp = clientIp;
+    req.headers['x-forwarded-for'] = clientIp;
+  }
+
+  next();
+};
+
+const httpLogger = pinoHttp<Request, Response>({
+  logger: accessLogger,
+  genReqId: request => {
+    const reqWithContext = request as Request;
+    const cfRayHeader = reqWithContext.headers['cf-ray'];
+    const headerValue = Array.isArray(cfRayHeader) ? cfRayHeader[0] : cfRayHeader;
+    const fromHeader = headerValue?.split(',')[0]?.trim();
+    const requestId = fromHeader && fromHeader.length > 0 ? fromHeader : randomUUID();
+    reqWithContext.requestId = requestId;
+    return requestId;
+  },
+  customProps: (request, response) => {
+    const reqWithContext = request as Request;
+    const resWithContext = response as Response & { responseTime?: number };
+    const latency =
+      typeof resWithContext.responseTime === 'number' ? Number(resWithContext.responseTime.toFixed(3)) : undefined;
+    return {
+      requestId: reqWithContext.requestId,
+      clientIp: reqWithContext.clientIp ?? reqWithContext.ip,
+      deviceId: resWithContext.locals.deviceId,
+      outcome: resWithContext.statusCode >= 500 ? 'error' : resWithContext.statusCode >= 400 ? 'rejected' : 'success',
+      latencyMs: latency
+    };
+  },
+  customLogLevel: (_req, res, err) => {
+    if (err || res.statusCode >= 500) {
+      return 'error';
+    }
+    if (res.statusCode >= 400) {
+      return 'warn';
+    }
+    return 'info';
+  },
+  customSuccessMessage: req => `${req.method} ${req.url} completed`,
+  customErrorMessage: req => `${req.method} ${req.url} errored`,
+  wrapSerializers: true
+});
+
+app.use(requestMetadataMiddleware);
+app.use(httpLogger);
+
+const cloudflareAuthMiddleware: express.RequestHandler = (req, res, next) => {
   if (appConfig.requireCloudflareAuth && !req.clientIp) {
+    req.log.warn({ requestId: req.requestId }, 'Rejected request without Cloudflare authentication');
     res.status(403).json({ error: 'Requests must pass through Cloudflare Authenticated Origin Pulls.' });
     return;
   }
@@ -215,6 +270,7 @@ const port = Number.parseInt(process.env.PORT ?? '3000', 10);
 const host = process.env.HOST ?? '0.0.0.0';
 
 const telegramBot = createTelegramBot(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_POLLING === 'false');
+const telegramLogger = appLogger.child({ subsystem: 'telegram' });
 
 if (telegramBot) {
   telegramBot.on('message', async msg => {
@@ -224,7 +280,7 @@ if (telegramBot) {
     if (text === '/start') {
       void telegramBot
         .sendMessage(msg.chat.id, '👋 Selamat datang! Silakan pilih lantai Anda.\nKetik nomor lantai (misal: 1, 2, 3, dst.)')
-        .catch(error => console.error(`Failed to send /start instructions to ${chatID}`, error));
+        .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send /start instructions'));
       return;
     }
 
@@ -235,10 +291,10 @@ if (telegramBot) {
         petugas[chatID] = { lantai };
         await telegramBot.sendMessage(msg.chat.id, `📍 Anda terdaftar sebagai petugas untuk Lantai ${lantai}.`);
       } catch (error) {
-        console.error(`Failed to persist Telegram subscription for ${chatID}`, error);
+        telegramLogger.error({ err: error, chatID, lantai }, 'Failed to persist Telegram subscription');
         void telegramBot
           .sendMessage(msg.chat.id, '⚠️ Gagal menyimpan pilihan lantai Anda. Silakan coba lagi nanti.')
-          .catch(err => console.error(`Failed to send error notification to ${chatID}`, err));
+          .catch(err => telegramLogger.error({ err, chatID }, 'Failed to send subscription error notification'));
       }
       return;
     }
@@ -250,15 +306,15 @@ if (telegramBot) {
           delete petugas[chatID];
           await telegramBot.sendMessage(msg.chat.id, 'Terima kasih. Pendaftaran Anda telah diakhiri.');
         } catch (error) {
-          console.error(`Failed to remove Telegram subscription for ${chatID}`, error);
+          telegramLogger.error({ err: error, chatID }, 'Failed to remove Telegram subscription');
           void telegramBot
             .sendMessage(msg.chat.id, '⚠️ Gagal menghapus pendaftaran Anda. Mohon coba lagi nanti.')
-            .catch(err => console.error(`Failed to send unsubscribe error to ${chatID}`, err));
+            .catch(err => telegramLogger.error({ err, chatID }, 'Failed to send unsubscribe error notification'));
         }
       } else {
         void telegramBot
           .sendMessage(msg.chat.id, 'Anda belum terdaftar. Gunakan /start untuk mendaftar.')
-          .catch(error => console.error(`Failed to send not-registered notice to ${chatID}`, error));
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send not-registered notice'));
       }
       return;
     }
@@ -280,10 +336,10 @@ if (telegramBot) {
         return;
       }
 
-      const amonia = parseJson<AmmoniaSensorData>(data.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' });
-      const water = parseJson<WaterSensorData>(data.air, { status: 'Data tidak ada' });
-      const soap = parseJson<SoapSensorData>(data.sabun, defaultSoapData());
-      const tissue = parseJson<TissueSensorData>(data.tisu, defaultTissueData());
+      const amonia = parseJson<AmmoniaSensorData>(data.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' }, telegramLogger);
+      const water = parseJson<WaterSensorData>(data.air, { status: 'Data tidak ada' }, telegramLogger);
+      const soap = parseJson<SoapSensorData>(data.sabun, defaultSoapData(), telegramLogger);
+      const tissue = parseJson<TissueSensorData>(data.tisu, defaultTissueData(), telegramLogger);
       const timestamp = new Date(data.timestamp).toLocaleString();
 
       const isAnySoapCritical =
@@ -305,7 +361,9 @@ if (telegramBot) {
       return;
     }
 
-    telegramBot.sendMessage(msg.chat.id, 'Maaf, perintah tidak dikenali. Gunakan /start untuk memulai atau /data untuk laporan.');
+    void telegramBot
+      .sendMessage(msg.chat.id, 'Maaf, perintah tidak dikenali. Gunakan /start untuk memulai atau /data untuk laporan.')
+      .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send unknown command notice'));
   });
 }
 
@@ -349,7 +407,7 @@ app.post('/api/config', async (req: Request, res: Response) => {
     config = deriveConfig(baseConfig);
     res.status(200).json({ status: 'ok' });
   } catch (error) {
-    console.error('Failed to persist configuration overrides.', error);
+    req.log.error({ err: error }, 'Failed to persist configuration overrides');
     res.status(500).json({ error: 'Failed to persist configuration overrides.' });
   }
 });
@@ -363,9 +421,10 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
   const payload = parseResult.data;
   const deviceID = payload.deviceID;
+  res.locals.deviceId = deviceID;
 
   const now = Date.now();
-  const normalized = normalizeSensorPayload(payload);
+  const normalized = normalizeSensorPayload(payload, req.log);
 
   latestData[deviceID] = {
     ...normalized,
@@ -392,11 +451,11 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
   try {
     await latestSnapshotRepository.upsert(latestSnapshotRecord);
   } catch (error) {
-    console.error(`[Latest Snapshot] Failed to persist data for ${deviceID}`, error);
+    req.log.error({ err: error, deviceId: deviceID }, '[Latest Snapshot] Failed to persist data');
   }
 
-  const amonia = parseJson<AmmoniaSensorData>(normalized.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' });
-  const soap = parseJson<SoapSensorData>(normalized.sabun, defaultSoapData());
+  const amonia = parseJson<AmmoniaSensorData>(normalized.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' }, req.log);
+  const soap = parseJson<SoapSensorData>(normalized.sabun, defaultSoapData(), req.log);
   const tissue = normalized.tisu;
 
   const isAnySoapCritical =
@@ -414,7 +473,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
     status.soapPendingStartTime = 0;
   }
 
-  const activeAlerts = getActiveAlerts(deviceID, status.soapStatusConfirmed, tissue);
+  const activeAlerts = getActiveAlerts(deviceID, status.soapStatusConfirmed, tissue, req.log);
   const isAlerting = activeAlerts.length > 0;
 
   if (isAlerting) {
@@ -423,14 +482,20 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
       status.alertStartTime = now;
       status.lastAlertSentTime = now;
       status.isRecoverySent = false;
-      sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_new');
+      sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_new', {
+        logger: req.log,
+        requestId: req.requestId
+      });
     } else if (
       config.maxReminders > 0 &&
       now - status.lastAlertSentTime >= config.reminderIntervalMs &&
       now - status.alertStartTime < config.maxAlertDurationMs
     ) {
       status.lastAlertSentTime = now;
-      sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_repeat');
+      sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_repeat', {
+        logger: req.log,
+        requestId: req.requestId
+      });
     }
   } else if (status.isAlert) {
     status.isAlert = false;
@@ -439,7 +504,10 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
     if (!status.isRecoverySent) {
       status.isRecoverySent = true;
-      sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'recovery');
+      sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'recovery', {
+        logger: req.log,
+        requestId: req.requestId
+      });
     }
   }
 
@@ -449,10 +517,13 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
       await historyRepository.record(latestSnapshotRecord);
       lastHistoricalSaveTime[deviceID] = now;
       if (!isAlerting) {
-        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'routine');
+        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'routine', {
+          logger: req.log,
+          requestId: req.requestId
+        });
       }
     } catch (err) {
-      console.error(`[Historical Log] Failed to write data for ${deviceID}`, err);
+      req.log.error({ err, deviceId: deviceID }, '[Historical Log] Failed to write data');
     }
   }
 
@@ -477,7 +548,7 @@ app.get('/api/latest', async (_req: Request, res: Response) => {
   res.json(latestData);
 });
 
-app.get('/api/history', async (_req: Request, res: Response) => {
+app.get('/api/history', async (req: Request, res: Response) => {
   try {
     const groupedHistory = await historyRepository.findAllGrouped();
     const allHistory: Record<string, LatestDeviceSnapshot[]> = {};
@@ -488,7 +559,7 @@ app.get('/api/history', async (_req: Request, res: Response) => {
 
     res.json(allHistory);
   } catch (error) {
-    console.error('Error reading historical data:', error);
+    req.log.error({ err: error }, 'Error reading historical data');
     res.status(500).send('No historical data available.');
   }
 });
@@ -504,12 +575,15 @@ app.use((err: Error, _req: Request, res: Response, next: NextFunction) => {
 bootstrap()
   .then(() => {
     app.listen(port, host, () => {
-      console.log(`Server is running at http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`);
-      console.log('Waiting for data from ESP32s...');
+      appLogger.info(
+        { host, port, url: `http://${host === '0.0.0.0' ? 'localhost' : host}:${port}` },
+        'Server is running'
+      );
+      appLogger.info('Waiting for data from ESP32s...');
     });
   })
   .catch(error => {
-    console.error('Failed to initialize the server.', error);
+    appLogger.error({ err: error }, 'Failed to initialize the server');
     process.exit(1);
   });
 
@@ -522,17 +596,20 @@ function deriveConfig(input: ConfigBase): Config {
   };
 }
 
-function normalizeSensorPayload(payload: RawSensorPayload): Omit<LatestDeviceSnapshot, 'timestamp' | 'espStatus' | 'lastActive'> {
+function normalizeSensorPayload(
+  payload: RawSensorPayload,
+  logger: Logger
+): Omit<LatestDeviceSnapshot, 'timestamp' | 'espStatus' | 'lastActive'> {
   return {
     deviceID: payload.deviceID,
-    amonia: stringifyIfNeeded(payload.amonia),
-    air: stringifyIfNeeded(payload.air),
-    sabun: stringifyIfNeeded(payload.sabun),
-    tisu: stringifyIfNeeded(payload.tisu)
+    amonia: stringifyIfNeeded(payload.amonia, logger),
+    air: stringifyIfNeeded(payload.air, logger),
+    sabun: stringifyIfNeeded(payload.sabun, logger),
+    tisu: stringifyIfNeeded(payload.tisu, logger)
   };
 }
 
-function stringifyIfNeeded(value: unknown): string {
+function stringifyIfNeeded(value: unknown, logger: Logger): string {
   if (typeof value === 'string') {
     return value;
   }
@@ -542,7 +619,7 @@ function stringifyIfNeeded(value: unknown): string {
   try {
     return JSON.stringify(value);
   } catch (error) {
-    console.error('Failed to stringify sensor payload, defaulting to empty object.', error);
+    logger.error({ err: error }, 'Failed to stringify sensor payload, defaulting to empty object');
     return '{}';
   }
 }
@@ -584,14 +661,19 @@ function toLatestDeviceSnapshot(record: SnapshotRecord): LatestDeviceSnapshot {
   };
 }
 
-function getActiveAlerts(deviceID: string, soapStatusConfirmed: SoapStatus, tissueRaw: string): string[] {
+function getActiveAlerts(
+  deviceID: string,
+  soapStatusConfirmed: SoapStatus,
+  tissueRaw: string,
+  logger: Logger = appLogger
+): string[] {
   const alerts: string[] = [];
 
   if (soapStatusConfirmed === 'critical') {
     alerts.push('SABUN HAMPIR HABIS');
   }
 
-  const tissue = parseJson<TissueSensorData>(tissueRaw, defaultTissueData());
+  const tissue = parseJson<TissueSensorData>(tissueRaw, defaultTissueData(), logger);
   const statusTisu1 = tissue.tisu1.status;
   const statusTisu2 = tissue.tisu2.status;
 
@@ -608,7 +690,8 @@ function sendTelegramAlert(
   sensorData: LatestDeviceSnapshot,
   lantai: number,
   activeAlerts: string[],
-  type: AlertType
+  type: AlertType,
+  context: { logger?: Logger; requestId?: string } = {}
 ) {
   if (!bot) {
     return;
@@ -618,10 +701,11 @@ function sendTelegramAlert(
     return;
   }
 
-  const amonia = parseJson<AmmoniaSensorData>(sensorData.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' });
-  const water = parseJson<WaterSensorData>(sensorData.air, { status: 'Data tidak ada' });
-  const soap = parseJson<SoapSensorData>(sensorData.sabun, defaultSoapData());
-  const tissue = parseJson<TissueSensorData>(sensorData.tisu, defaultTissueData());
+  const logger = context.logger ?? appLogger;
+  const amonia = parseJson<AmmoniaSensorData>(sensorData.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' }, logger);
+  const water = parseJson<WaterSensorData>(sensorData.air, { status: 'Data tidak ada' }, logger);
+  const soap = parseJson<SoapSensorData>(sensorData.sabun, defaultSoapData(), logger);
+  const tissue = parseJson<TissueSensorData>(sensorData.tisu, defaultTissueData(), logger);
   const timestamp = new Date(sensorData.timestamp).toLocaleString();
 
   const isAnySoapCritical =
@@ -668,20 +752,24 @@ function sendTelegramAlert(
       `Tisu: ${tissueStatusKeseluruhan}`
     ].join('\n');
 
-    bot.sendMessage(Number(chatID), `${message}${statusDetails}`).catch(error => {
-      console.error(`Failed to send Telegram message to ${chatID}`, error);
-    });
+    const requestSuffix = context.requestId ? `\nRequest ID: ${context.requestId}` : '';
+
+    bot
+      .sendMessage(Number(chatID), `${message}${statusDetails}${requestSuffix}`)
+      .catch(error => {
+        logger.error({ err: error, chatID, deviceId: deviceID, requestId: context.requestId }, 'Failed to send Telegram message');
+      });
   });
 }
 
-function parseJson<T>(value: string, fallback: T): T {
+function parseJson<T>(value: string, fallback: T, logger: Logger = appLogger): T {
   if (!value) {
     return fallback;
   }
   try {
     return JSON.parse(value) as T;
   } catch (error) {
-    console.error('Failed to parse JSON payload.', error);
+    logger.error({ err: error }, 'Failed to parse JSON payload');
     return fallback;
   }
 }
@@ -734,14 +822,14 @@ async function bootstrap(): Promise<void> {
       lastHistoricalSaveTime[deviceId] = timestamp.getTime();
     });
   } catch (error) {
-    console.error('Bootstrap initialization failed.', error);
+    appLogger.error({ err: error }, 'Bootstrap initialization failed');
     throw error;
   }
 }
 
 function createTelegramBot(token: string | undefined, disablePolling: boolean): TelegramBot | null {
   if (!token) {
-    console.warn('TELEGRAM_BOT_TOKEN tidak disetel. Notifikasi Telegram dinonaktifkan.');
+    appLogger.warn('TELEGRAM_BOT_TOKEN tidak disetel. Notifikasi Telegram dinonaktifkan.');
     return null;
   }
 
@@ -749,7 +837,7 @@ function createTelegramBot(token: string | undefined, disablePolling: boolean): 
     const bot = new TelegramBot(token, { polling: !disablePolling });
     return bot;
   } catch (error) {
-    console.error('Gagal menginisialisasi Telegram bot, notifikasi dinonaktifkan.', error);
+    appLogger.error({ err: error }, 'Gagal menginisialisasi Telegram bot, notifikasi dinonaktifkan');
     return null;
   }
 }
