@@ -92,6 +92,16 @@ EOF
 - Keep environment-specific variables (database URLs, tokens, PM2 ecosystem configs) scoped to their respective environment to avoid accidental cross-stage leakage.
 - CI verifies deployments by curling the configured healthcheck URL and tailing PM2 logs for 60 seconds. If automation fails, fall back to the manual commands above and open an incident report.
 
+### Device provisioning & API key rotation
+Field hardware stores its Wi-Fi credentials, device identifier, and API access parameters in SPIFFS at `/config.json`. Devices boot with a default ingestion target of `https://toilet-api-dev.example.com/data` and validate TLS using the bundled Let's Encrypt ISRG Root X1 certificate. Updates arrive via the WiFiManager captive portal:
+
+1. Hold the physical `GPIO0` button for ≥3 seconds until the device announces `START AP` on the OLED.
+2. Connect to the ad-hoc network `ToiletSetup` (password `monitor123`) and browse to `http://192.168.4.1/`.
+3. Provide Wi-Fi credentials plus the latest values for **Device ID**, **API Base URL**, and **API Key**. The firmware automatically persists these fields to `/config.json` and reuses them after reboot.
+4. Confirm the LED stops blinking and the status screen shows the updated Device ID and IP address.
+
+When rotating backend secrets, operations only need to repeat steps 1–3 with the fresh API key (or host) and the device will immediately start sending HTTPS requests with the correct `X-API-Key` header.
+
 ### Rollback procedures
 If a deploy introduces regressions, revert to the previous healthy commit:
 

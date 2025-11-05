@@ -6,6 +6,9 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <math.h>
+#include <FS.h>
+#include <SPIFFS.h>
+#include <cstring>
 
 // Sertakan file header untuk display (dengan I2C kustom dan styling minimalis)
 #include "display.h" 
@@ -25,15 +28,57 @@ const char* wifiSetupApPassword = "monitor123";
 unsigned long lastReconnectAttempt = 0;
 const unsigned long reconnectInterval = 30000UL;
 
-// === Server Web Lokal ===
-const char* serverURL = "http://192.168.8.30:3000/data";
+// === Konfigurasi Server ===
+const char* defaultApiBaseUrl = "https://toilet-api-dev.example.com";
+const char* configFilePath = "/config.json";
 
-// Buffer INTERNAL untuk menyimpan nilai Device ID
-char tempDeviceId[40] = {0}; 
+char tempDeviceId[40] = {0};
+char apiBaseUrl[128] = "https://toilet-api-dev.example.com";
+char apiKey[80] = {0};
 
-// Deklarasi objek parameter untuk WiFiManager. 
+bool shouldSaveConfig = false;
+bool configLoadedFromFS = false;
+bool spiffsMounted = false;
+
+const char* rootCACertificate = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+SjELMAkGA1UEBhMCVVMxFjAUBgNVBAoTDUxldCdzIEVuY3J5cHQxIzAhBgNVBAMT
+GkxldCdzIEVuY3J5cHQgQXV0aG9yaXR5MB4XDTIxMDQxMzEzMTM0N1oXDTMyMDQx
+MzEzMTM0N1owSjELMAkGA1UEBhMCVVMxFjAUBgNVBAoTDUxldCdzIEVuY3J5cHQx
+IzAhBgNVBAMTGkxldCdzIEVuY3J5cHQgQXV0aG9yaXR5MIICIjANBgkqhkiG9w0B
+AQEFAAOCAg8AMIICCgKCAgEA7ahH2PV9K2VwQeWLb8Y/voI8pkXeM+7wNX5n9DnE
+Wk24fR4um7b+Mh+QfKt0/jS920STTHV80bkkSgPyB8uvKMuPNsa1Z0hPfMe5A/VQ
+JhGkZLOJrd/qlFX/njb3VRXvyzTqwvtOhqQhR69AE2T18DUfKZN5j9dOOXw6CEp+
+5/+1+R8qXt0g/vPX1ZLc6vMzuh/XLN31rYcYysVhSuocqH2aV0y2U2hX7MQK7GJS
+z6Jak5Jc+0UX2OS6zm1p5WxmL8tYOMaSjIgJ5rbfJzCbZ4IXwZjlGAIvMCa/78aP
+NjclS1bZKnJiGAsDYQwOoj7k6Crgn2nMW1zlxwqHJ5532diGg+EHu0ooChBjO8PK
+HD3lFfyxS/pFKL+w35ofHnND9pUEdZsrXbPw1Bsk6DhLdn6S92fl7D53hL+XN4Zz
+16XOWTe90rRAN6ye1YMwnsG3OIRHe9LtVZ7DI+xZHI9/ERFuk8sMVaAoJT86nAdJ
+7LGUcVbDyudRpvAJhu7V6XUie5Wh3E1nCGoDDte5YmdnPePMA0MavCfoUJ29/rrX
+w6Ni01X/fI23qWGNnb4MzWE9usFiqSvGSEk7h5pWHB1+ZfmV/QGOa3DXvDEdEbgC
+F6dbnh2JEiU6BqzJXbXrIuAyG9gme6pzuxbU7jSFBWyD0H28Y3s/j4K1IPuxDLxd
+AvYAY7NdM/6uF9MCAwEAAaNCMEAwDgYDVR0PAQH/BAQDAgGGMA8GA1UdEwEB/wQF
+MAMBAf8wHQYDVR0OBBYEFBQusxe3WFbLrlAJQOYfr52LFMLGMA0GCSqGSIb3DQEB
+CwUAA4ICAQAf8K8Y3fCA3D9NehQOJBNB1LsY5GApGXKk2b7xGTCK7Q0w3AV/Q93v
+9VEC0hLnLwhzwmAATbIZCkJ0s9Ia4DmL6dV8QZLMzrb2sXwRDq0sik+qTHSxQBik
+Bpm3b9+p5/O8nzYVPGQr6bh7Q0b81229fuyWeZzdjvDjDygGhz0QHFBBSzKaR9mE
+J2H7N1mZZQAf+JfbxuZq70kCcen6/DMEkPcU847BvX7xY+nau73NNvgxLCE2Jd/g
+TOMSXBJtNx9X6r8ahJLPPr8oN9q0PnZESFQbjS5tOMcEYoe0VayfM7Xgj1s0PGRB
+MGhXRCVw2SfwlaPBDafc/5+3yoUxX7X3d7h//1VSK8Ur0H6vXZFZEwOs3N5wqZ4E
+YBBXItq0F6G47hzKbz2Dtz0CkvK8Hy9+LO60F0NF7i3ZfQJ+E+XYYLFXqs28VWz2
+CMaO6IcG2Z6w3kNjEcNWef39/C4R2tQeM+c/fi91tIez3pCrJ4Ly+E8d4Z3Vqn0G
+dyB/m4Gqsc7VcRbP5t6dv3Vv4Y20N6l0e6MN2eUVx/FuWRz11FXAs8MVXJ8bY64v
+QU87E+G1U0et3NdH7mZ2pGpQSQ04xMGrm8V8eoyye3N2WBci2W0slZJi/1QGxUL/
+rc3vDLEh49D8Q0g4Y6k9FMsFww37YHpn6V+2G3P39UO44ywQA8oYbg==
+-----END CERTIFICATE-----
+)EOF";
+
+// Deklarasi objek parameter untuk WiFiManager.
 // Nilai yang tersimpan akan dimuat ke tempDeviceId secara internal oleh WiFiManager.
-WiFiManagerParameter custom_device_id("deviceid", "Device ID (e.g. toilet-lantai-2)", tempDeviceId, 40); 
+WiFiManagerParameter custom_device_id("deviceid", "Device ID (e.g. toilet-lantai-2)", tempDeviceId, 40);
+WiFiManagerParameter custom_api_base_url("api_base_url", "API Base URL (https://...)", apiBaseUrl, sizeof(apiBaseUrl));
+WiFiManagerParameter custom_api_key("api_key", "API Key", apiKey, sizeof(apiKey));
 
 // === PIN & Variabel Global Utama ===
 const int ledPin = 2; // LED Indikator Status
@@ -49,11 +94,17 @@ String getSoapDataJson();
 String getTissueDataJson();
 void saveConfigCallback();
 void checkAndStartAP();
+bool loadConfigFromFS();
+bool saveConfigToFS();
+void updateLocalConfigFromParameters();
+void copyParam(char* destination, size_t length, const char* source);
+void signalErrorPattern();
+String buildApiEndpoint(const String& baseUrl);
 
 // FUNGSI CALLBACK: Dipanggil saat konfigurasi custom field disimpan
 void saveConfigCallback() {
-  Serial.println("Konfigurasi Device ID baru disimpan!");
-  // FIX: Nilai sudah tersimpan ke buffer internal. Hanya perlu verifikasi.
+  Serial.println("Konfigurasi baru disimpan melalui portal!");
+  shouldSaveConfig = true;
   Serial.print("Device ID yang disimpan: ");
   Serial.println(custom_device_id.getValue());
 }
@@ -71,11 +122,24 @@ void checkAndStartAP() {
                 
                 extern WiFiManagerParameter custom_device_id;
                 wifiManager.addParameter(&custom_device_id);
-                
+                wifiManager.addParameter(&custom_api_base_url);
+                wifiManager.addParameter(&custom_api_key);
+                wifiManager.setSaveConfigCallback(saveConfigCallback);
+
                 bool res = wifiManager.startConfigPortal(wifiSetupApName, wifiSetupApPassword);
 
                 if (res) {
                     Serial.println("Berhasil keluar dari portal dan terhubung.");
+                    updateLocalConfigFromParameters();
+                    if (!spiffsMounted) {
+                        spiffsMounted = SPIFFS.begin(true);
+                    }
+                    if ((shouldSaveConfig || !configLoadedFromFS) && spiffsMounted) {
+                        if (saveConfigToFS()) {
+                            shouldSaveConfig = false;
+                            configLoadedFromFS = true;
+                        }
+                    }
                     displayRunningStatus(WiFi.localIP().toString(), custom_device_id.getValue());
                 } else {
                     Serial.println("Gagal keluar dari portal.");
@@ -105,12 +169,31 @@ void setup() {
     setupSoapSensor();
     setupTissueSensor();
 
+    spiffsMounted = SPIFFS.begin(true);
+    if (spiffsMounted) {
+        configLoadedFromFS = loadConfigFromFS();
+        if (configLoadedFromFS) {
+            custom_device_id.setValue(tempDeviceId, sizeof(tempDeviceId));
+            custom_api_base_url.setValue(apiBaseUrl, sizeof(apiBaseUrl));
+            custom_api_key.setValue(apiKey, sizeof(apiKey));
+        } else {
+            // Pastikan parameter memuat nilai default meski belum ada file config.
+            custom_device_id.setValue(tempDeviceId, sizeof(tempDeviceId));
+            custom_api_base_url.setValue(apiBaseUrl, sizeof(apiBaseUrl));
+            custom_api_key.setValue(apiKey, sizeof(apiKey));
+        }
+    } else {
+        Serial.println("⚠️ Gagal mount SPIFFS. Konfigurasi tidak dapat dimuat.");
+    }
+
     WiFi.mode(WIFI_STA);
     WiFiManager wifiManager;
     wifiManager.setTimeout(180);
 
     // Tambahkan parameter Device ID dan set callback
     wifiManager.addParameter(&custom_device_id);
+    wifiManager.addParameter(&custom_api_base_url);
+    wifiManager.addParameter(&custom_api_key);
     wifiManager.setSaveConfigCallback(saveConfigCallback);
 
     Serial.println("Menyiapkan koneksi WiFi...");
@@ -131,7 +214,18 @@ void setup() {
     Serial.println(WiFi.SSID());
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
-    
+
+    updateLocalConfigFromParameters();
+    if (!spiffsMounted) {
+        spiffsMounted = SPIFFS.begin(true);
+    }
+    if ((shouldSaveConfig || !configLoadedFromFS) && spiffsMounted) {
+        if (saveConfigToFS()) {
+            shouldSaveConfig = false;
+            configLoadedFromFS = true;
+        }
+    }
+
     // Tampilkan Running Status Minimalis: Device ID, Status Online, dan IP
     displayRunningStatus(WiFi.localIP().toString(), custom_device_id.getValue());
 
@@ -192,32 +286,218 @@ void ensureWifiConnection() {
 }
 
 void kirimDataKeServer() {
-    if (WiFi.status() == WL_CONNECTED) {
-        HTTPClient http;
-        http.begin(serverURL);
-        http.addHeader("Content-Type", "application/json");
-        
-        StaticJsonDocument<768> doc; 
-        doc["deviceID"] = custom_device_id.getValue(); 
-        doc["amonia"] = getAmoniaDataJson();
-        doc["air"] = getWaterDataJson();
-        doc["sabun"] = getSoapDataJson();
-        doc["tisu"] = getTissueDataJson();
-        doc["espStatus"] = "active";
-
-        String jsonString;
-        serializeJson(doc, jsonString);
-        
-        int httpResponseCode = http.POST(jsonString);
-
-        if (httpResponseCode > 0) {
-            Serial.printf("[HTTP] POST... code: %d\n", httpResponseCode);
-            String payload = http.getString();
-        } else {
-            Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpResponseCode).c_str());
-        }
-        http.end();
+    if (WiFi.status() != WL_CONNECTED) {
+        return;
     }
+
+    String baseUrl = String(custom_api_base_url.getValue());
+    baseUrl.trim();
+    if (baseUrl.length() == 0) {
+        baseUrl = String(defaultApiBaseUrl);
+    }
+
+    String endpoint = buildApiEndpoint(baseUrl);
+    if (endpoint.length() == 0) {
+        Serial.println("[HTTP] Endpoint kosong atau tidak valid. Kiriman dibatalkan.");
+        signalErrorPattern();
+        return;
+    }
+
+    String apiKeyHeader = String(custom_api_key.getValue());
+    apiKeyHeader.trim();
+
+    const int maxAttempts = 3;
+    bool requestSucceeded = false;
+
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+        WiFiClientSecure client;
+        client.setCACert(rootCACertificate);
+        client.setTimeout(15000);
+        client.setHandshakeTimeout(15);
+
+        HTTPClient http;
+
+        if (!http.begin(client, endpoint)) {
+            Serial.printf("[HTTP] Gagal memulai koneksi ke %s (percobaan %d/%d)\n", endpoint.c_str(), attempt, maxAttempts);
+        } else {
+            http.addHeader("Content-Type", "application/json");
+            if (apiKeyHeader.length() > 0) {
+                http.addHeader("X-API-Key", apiKeyHeader);
+            } else {
+                Serial.println("[HTTP] ⚠️ API key kosong. Permintaan kemungkinan ditolak server.");
+            }
+
+            StaticJsonDocument<768> doc;
+            doc["deviceID"] = custom_device_id.getValue();
+            doc["amonia"] = getAmoniaDataJson();
+            doc["air"] = getWaterDataJson();
+            doc["sabun"] = getSoapDataJson();
+            doc["tisu"] = getTissueDataJson();
+            doc["espStatus"] = "active";
+
+            String jsonString;
+            serializeJson(doc, jsonString);
+
+            int httpResponseCode = http.POST(jsonString);
+
+            if (httpResponseCode > 0) {
+                if (httpResponseCode == 200) {
+                    Serial.printf("[HTTP] POST berhasil dengan kode: %d\n", httpResponseCode);
+                    requestSucceeded = true;
+                } else {
+                    String responseBody = http.getString();
+                    Serial.printf("[HTTP] POST mengembalikan kode: %d. Respons: %s\n", httpResponseCode, responseBody.c_str());
+                }
+            } else {
+                Serial.printf("[HTTP] POST gagal, error: %s\n", http.errorToString(httpResponseCode).c_str());
+            }
+        }
+
+        http.end();
+
+        if (requestSucceeded) {
+            digitalWrite(ledPin, LOW);
+            break;
+        }
+
+        signalErrorPattern();
+        if (attempt < maxAttempts) {
+            unsigned long backoff = 1000UL << (attempt - 1); // 1s, 2s, 4s
+            delay(backoff);
+        }
+    }
+}
+
+bool loadConfigFromFS() {
+    if (!spiffsMounted) {
+        Serial.println("SPIFFS belum dimount; melewati pemuatan konfigurasi.");
+        return false;
+    }
+
+    if (!SPIFFS.exists(configFilePath)) {
+        Serial.println("Config belum tersedia di SPIFFS. Menggunakan default.");
+        return false;
+    }
+
+    File configFile = SPIFFS.open(configFilePath, "r");
+    if (!configFile) {
+        Serial.println("Gagal membuka file konfigurasi.");
+        return false;
+    }
+
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, configFile);
+    configFile.close();
+
+    if (error) {
+        Serial.println("Gagal membaca konfigurasi, menggunakan default.");
+        return false;
+    }
+
+    if (doc.containsKey("device_id")) {
+        copyParam(tempDeviceId, sizeof(tempDeviceId), doc["device_id"]);
+    }
+    if (doc.containsKey("api_base_url")) {
+        copyParam(apiBaseUrl, sizeof(apiBaseUrl), doc["api_base_url"]);
+    }
+    if (doc.containsKey("api_key")) {
+        copyParam(apiKey, sizeof(apiKey), doc["api_key"]);
+    }
+
+    Serial.println("Konfigurasi dimuat dari SPIFFS.");
+    return true;
+}
+
+bool saveConfigToFS() {
+    if (!spiffsMounted) {
+        Serial.println("SPIFFS belum dimount; tidak dapat menyimpan konfigurasi.");
+        return false;
+    }
+
+    StaticJsonDocument<256> doc;
+    doc["device_id"] = strlen(tempDeviceId) > 0 ? tempDeviceId : custom_device_id.getValue();
+    doc["api_base_url"] = strlen(apiBaseUrl) > 0 ? apiBaseUrl : defaultApiBaseUrl;
+    doc["api_key"] = apiKey;
+
+    File configFile = SPIFFS.open(configFilePath, "w");
+    if (!configFile) {
+        Serial.println("Gagal membuka file konfigurasi untuk ditulis.");
+        return false;
+    }
+
+    if (serializeJson(doc, configFile) == 0) {
+        Serial.println("Gagal menulis konfigurasi ke file.");
+        configFile.close();
+        return false;
+    }
+
+    configFile.close();
+    Serial.println("Konfigurasi tersimpan ke SPIFFS.");
+    return true;
+}
+
+void updateLocalConfigFromParameters() {
+    copyParam(tempDeviceId, sizeof(tempDeviceId), custom_device_id.getValue());
+    copyParam(apiBaseUrl, sizeof(apiBaseUrl), custom_api_base_url.getValue());
+    copyParam(apiKey, sizeof(apiKey), custom_api_key.getValue());
+}
+
+void copyParam(char* destination, size_t length, const char* source) {
+    if (!destination || length == 0) {
+        return;
+    }
+
+    if (!source) {
+        destination[0] = '\0';
+        return;
+    }
+
+    strncpy(destination, source, length - 1);
+    destination[length - 1] = '\0';
+}
+
+void signalErrorPattern() {
+    const int blinkCount = 3;
+    for (int i = 0; i < blinkCount; ++i) {
+        digitalWrite(ledPin, HIGH);
+        delay(120);
+        digitalWrite(ledPin, LOW);
+        delay(120);
+    }
+}
+
+String buildApiEndpoint(const String& baseUrl) {
+    if (baseUrl.length() == 0) {
+        return "";
+    }
+
+    String sanitized = baseUrl;
+    sanitized.trim();
+
+    if (sanitized.startsWith("http://")) {
+        Serial.println("[HTTP] Basis URL harus menggunakan HTTPS. Menggunakan default.");
+        return buildApiEndpoint(String(defaultApiBaseUrl));
+    }
+
+    if (!sanitized.startsWith("https://")) {
+        Serial.println("[HTTP] Basis URL tidak menyertakan skema. Menambahkan https:// otomatis.");
+        String normalized = String("https://") + sanitized;
+        return buildApiEndpoint(normalized);
+    }
+
+    if (sanitized.endsWith("/data")) {
+        return sanitized;
+    }
+
+    if (sanitized.endsWith("/data/")) {
+        return sanitized.substring(0, sanitized.length() - 1);
+    }
+
+    if (sanitized.endsWith("/")) {
+        return sanitized + "data";
+    }
+
+    return sanitized + "/data";
 }
 
 // === Fungsi JSON Payload Sensor (Tetap Sama) ===
