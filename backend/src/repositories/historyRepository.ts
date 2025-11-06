@@ -84,15 +84,16 @@ export class HistoryRepository {
   }
 
   async getLatestTimestamps(): Promise<Record<string, Date>> {
-    const rows = (await this.prisma.deviceHistory.groupBy({
-      by: ['deviceId'],
+    const rows = await this.prisma.deviceHistory.groupBy({
+      by: ['deviceId'] as const,
       _max: { timestamp: true }
-    })) as Array<{ deviceId: string; _max: { timestamp: Date | null } }>;
+    });
 
     const result: Record<string, Date> = {};
     for (const row of rows) {
-      if (row._max.timestamp) {
-        result[row.deviceId] = row._max.timestamp;
+      const timestamp = row._max?.timestamp;
+      if (timestamp) {
+        result[row.deviceId] = timestamp;
       }
     }
     return result;

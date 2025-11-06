@@ -24,16 +24,16 @@ const int AP_BUTTON_PIN = 0;
 
 // === WiFi & Jaringan ===
 const char* wifiSetupApName = "ToiletSetup";
-const char* wifiSetupApPassword = "monitor123";
+const char* wifiSetupApPassword = "setup123";
 unsigned long lastReconnectAttempt = 0;
 const unsigned long reconnectInterval = 30000UL;
 
 // === Konfigurasi Server ===
-const char* defaultApiBaseUrl = "https://toilet-api-dev.example.com";
+const char* defaultApiBaseUrl = "https://toilet-api.muhamadfikri.com";
 const char* configFilePath = "/config.json";
 
 char tempDeviceId[40] = {0};
-char apiBaseUrl[128] = "https://toilet-api-dev.example.com";
+char apiBaseUrl[128] = "https://toilet-api.muhamadfikri.com";
 char apiKey[80] = {0};
 
 bool shouldSaveConfig = false;
@@ -42,37 +42,29 @@ bool spiffsMounted = false;
 
 const char* rootCACertificate = R"EOF(
 -----BEGIN CERTIFICATE-----
-MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
-SjELMAkGA1UEBhMCVVMxFjAUBgNVBAoTDUxldCdzIEVuY3J5cHQxIzAhBgNVBAMT
-GkxldCdzIEVuY3J5cHQgQXV0aG9yaXR5MB4XDTIxMDQxMzEzMTM0N1oXDTMyMDQx
-MzEzMTM0N1owSjELMAkGA1UEBhMCVVMxFjAUBgNVBAoTDUxldCdzIEVuY3J5cHQx
-IzAhBgNVBAMTGkxldCdzIEVuY3J5cHQgQXV0aG9yaXR5MIICIjANBgkqhkiG9w0B
-AQEFAAOCAg8AMIICCgKCAgEA7ahH2PV9K2VwQeWLb8Y/voI8pkXeM+7wNX5n9DnE
-Wk24fR4um7b+Mh+QfKt0/jS920STTHV80bkkSgPyB8uvKMuPNsa1Z0hPfMe5A/VQ
-JhGkZLOJrd/qlFX/njb3VRXvyzTqwvtOhqQhR69AE2T18DUfKZN5j9dOOXw6CEp+
-5/+1+R8qXt0g/vPX1ZLc6vMzuh/XLN31rYcYysVhSuocqH2aV0y2U2hX7MQK7GJS
-z6Jak5Jc+0UX2OS6zm1p5WxmL8tYOMaSjIgJ5rbfJzCbZ4IXwZjlGAIvMCa/78aP
-NjclS1bZKnJiGAsDYQwOoj7k6Crgn2nMW1zlxwqHJ5532diGg+EHu0ooChBjO8PK
-HD3lFfyxS/pFKL+w35ofHnND9pUEdZsrXbPw1Bsk6DhLdn6S92fl7D53hL+XN4Zz
-16XOWTe90rRAN6ye1YMwnsG3OIRHe9LtVZ7DI+xZHI9/ERFuk8sMVaAoJT86nAdJ
-7LGUcVbDyudRpvAJhu7V6XUie5Wh3E1nCGoDDte5YmdnPePMA0MavCfoUJ29/rrX
-w6Ni01X/fI23qWGNnb4MzWE9usFiqSvGSEk7h5pWHB1+ZfmV/QGOa3DXvDEdEbgC
-F6dbnh2JEiU6BqzJXbXrIuAyG9gme6pzuxbU7jSFBWyD0H28Y3s/j4K1IPuxDLxd
-AvYAY7NdM/6uF9MCAwEAAaNCMEAwDgYDVR0PAQH/BAQDAgGGMA8GA1UdEwEB/wQF
-MAMBAf8wHQYDVR0OBBYEFBQusxe3WFbLrlAJQOYfr52LFMLGMA0GCSqGSIb3DQEB
-CwUAA4ICAQAf8K8Y3fCA3D9NehQOJBNB1LsY5GApGXKk2b7xGTCK7Q0w3AV/Q93v
-9VEC0hLnLwhzwmAATbIZCkJ0s9Ia4DmL6dV8QZLMzrb2sXwRDq0sik+qTHSxQBik
-Bpm3b9+p5/O8nzYVPGQr6bh7Q0b81229fuyWeZzdjvDjDygGhz0QHFBBSzKaR9mE
-J2H7N1mZZQAf+JfbxuZq70kCcen6/DMEkPcU847BvX7xY+nau73NNvgxLCE2Jd/g
-TOMSXBJtNx9X6r8ahJLPPr8oN9q0PnZESFQbjS5tOMcEYoe0VayfM7Xgj1s0PGRB
-MGhXRCVw2SfwlaPBDafc/5+3yoUxX7X3d7h//1VSK8Ur0H6vXZFZEwOs3N5wqZ4E
-YBBXItq0F6G47hzKbz2Dtz0CkvK8Hy9+LO60F0NF7i3ZfQJ+E+XYYLFXqs28VWz2
-CMaO6IcG2Z6w3kNjEcNWef39/C4R2tQeM+c/fi91tIez3pCrJ4Ly+E8d4Z3Vqn0G
-dyB/m4Gqsc7VcRbP5t6dv3Vv4Y20N6l0e6MN2eUVx/FuWRz11FXAs8MVXJ8bY64v
-QU87E+G1U0et3NdH7mZ2pGpQSQ04xMGrm8V8eoyye3N2WBci2W0slZJi/1QGxUL/
-rc3vDLEh49D8Q0g4Y6k9FMsFww37YHpn6V+2G3P39UO44ywQA8oYbg==
+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
+BgNVHQ4EFgQUgEzW63T/STaj1dj8tT7FavCUHYwwHwYDVR0jBBgwFoAUYHtmGkUN
+l8qJUC99BM00qP/8/UswNgYIKwYBBQUHAQEEKjAoMCYGCCsGAQUFBzAChhpodHRw
+Oi8vaS5wa2kuZ29vZy9nc3IxLmNydDAtBgNVHR8EJjAkMCKgIKAehhxodHRwOi8v
+Yy5wa2kuZ29vZy9yL2dzcjEuY3JsMBMGA1UdIAQMMAowCAYGZ4EMAQIBMA0GCSqG
+SIb3DQEBCwUAA4IBAQAYQrsPBtYDh5bjP2OBDwmkoWhIDDkic574y04tfzHpn+cJ
+odI2D4SseesQ6bDrarZ7C30ddLibZatoKiws3UL9xnELz4ct92vID24FfVbiI1hY
++SW6FoVHkNeWIP0GCbaM4C6uVdF5dTUsMVs/ZbzNnIdCp5Gxmx5ejvEau8otR/Cs
+kGN+hr/W5GvT1tMBjgWKZ1i4//emhA1JG1BbPzoLJQvyEotc03lXjTaCzv8mEbep
+8RqZ7a2CPsgRbuvTPBwcOMBBmuFeU88+FSBX6+7iP0il8b4Z0QFqIwwMHfs/L6K1
+vepuoxtGzi4CZ68zJpiq1UvSqTbFJjtbD4seiMHl
 -----END CERTIFICATE-----
 )EOF";
+
+
 
 // Deklarasi objek parameter untuk WiFiManager.
 // Nilai yang tersimpan akan dimuat ke tempDeviceId secara internal oleh WiFiManager.
@@ -321,6 +313,9 @@ void kirimDataKeServer() {
             Serial.printf("[HTTP] Gagal memulai koneksi ke %s (percobaan %d/%d)\n", endpoint.c_str(), attempt, maxAttempts);
         } else {
             http.addHeader("Content-Type", "application/json");
+            http.addHeader("Origin", "https://toilet-app.muhamadfikri.com");
+            http.addHeader("X-API-Key", apiKeyHeader);
+
             if (apiKeyHeader.length() > 0) {
                 http.addHeader("X-API-Key", apiKeyHeader);
             } else {
