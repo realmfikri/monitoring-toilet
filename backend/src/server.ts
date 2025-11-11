@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
 import bcrypt from 'bcrypt';
 import cors from 'cors';
 import type { CorsOptions } from 'cors';
@@ -10,6 +11,8 @@ import TelegramBot from 'node-telegram-bot-api';
 import pinoHttp from 'pino-http';
 import type { Logger } from 'pino';
 import { z } from 'zod';
+
+import { WebSocketServer, WebSocket } from 'ws';
 
 import type { $Enums } from '@prisma/client';
 
@@ -178,6 +181,7 @@ interface ComputedSensorSnapshot {
 
 const SOAP_DEBOUNCE_MS = 5000;
 const ESP_INACTIVE_THRESHOLD_MS = 30000;
+const INACTIVITY_CHECK_INTERVAL_MS = 5000;
 
 const latestSnapshotRepository = new LatestSnapshotRepository(prisma);
 const historyRepository = new HistoryRepository(prisma);
@@ -202,10 +206,64 @@ let config: Config = DEFAULT_CONFIG;
 let petugas: Record<string, PetugasAssignment> = {};
 
 const latestData: Record<string, LatestDeviceSnapshot> = {};
+const websocketClients = new Set<WebSocket>();
 const lastHistoricalSaveTime: Record<string, number> = {};
 const deviceStatuses: Record<string, DeviceStatus> = {};
 
 const app = express();
+const server = createServer(app);
+
+setInterval(() => {
+  markInactiveDevices().catch(error => {
+    appLogger.warn({ err: error }, 'Failed to update inactive device statuses');
+  });
+}, INACTIVITY_CHECK_INTERVAL_MS);
+
+function broadcastLatestSnapshot(snapshot: LatestDeviceSnapshot): void {
+  if (websocketClients.size === 0) {
+    return;
+  }
+
+  const message = JSON.stringify({ type: 'snapshot', payload: snapshot });
+  websocketClients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+function updateLatestData(
+  deviceID: string,
+  updater: (previous: LatestDeviceSnapshot | undefined) => LatestDeviceSnapshot
+): LatestDeviceSnapshot {
+  const updated = updater(latestData[deviceID]);
+  latestData[deviceID] = updated;
+  broadcastLatestSnapshot(updated);
+  return updated;
+}
+
+async function markInactiveDevices(now = Date.now()): Promise<void> {
+  const updates: Promise<void>[] = [];
+
+  Object.values(latestData).forEach(entry => {
+    if (now - entry.lastActive > ESP_INACTIVE_THRESHOLD_MS && entry.espStatus !== 'inactive') {
+      updateLatestData(entry.deviceID, previous => ({
+        ...previous!,
+        espStatus: 'inactive'
+      }));
+      updates.push(latestSnapshotRepository.updateStatus(entry.deviceID, 'inactive'));
+    }
+  });
+
+  if (updates.length > 0) {
+    const results = await Promise.allSettled(updates);
+    results.forEach(result => {
+      if (result.status === 'rejected') {
+        appLogger.warn({ err: result.reason }, 'Failed to persist inactive status update');
+      }
+    });
+  }
+}
 
 const configuredApiKeys = getConfiguredApiKeys();
 const authSecret: Secret = appConfig.auth.secret;
@@ -401,6 +459,26 @@ async function verifyUserCredentials(email: string, password: string): Promise<A
   };
 }
 
+async function authenticateToken(token: string): Promise<AuthenticatedUser | null> {
+  const decoded = jwt.verify(token, authSecret) as JwtPayload;
+  const userId = decoded.sub;
+
+  if (!userId) {
+    return null;
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    return null;
+  }
+
+  return {
+    id: user.id,
+    email: user.email,
+    role: user.role
+  };
+}
+
 const authenticateRequest: express.RequestHandler = (req, res, next) => {
   const authorizationHeader = req.headers.authorization;
   if (!authorizationHeader || !authorizationHeader.startsWith('Bearer ')) {
@@ -410,37 +488,20 @@ const authenticateRequest: express.RequestHandler = (req, res, next) => {
 
   const token = authorizationHeader.slice('Bearer '.length).trim();
 
-  (async () => {
-    try {
-      const decoded = jwt.verify(token, authSecret) as JwtPayload;
-      const userId = decoded.sub;
-
-      if (!userId) {
-        res.status(401).json({ error: 'Invalid authentication token.' });
-        return;
-      }
-
-      const user = await prisma.user.findUnique({ where: { id: userId } });
+  authenticateToken(token)
+    .then(user => {
       if (!user) {
         res.status(401).json({ error: 'Invalid authentication token.' });
         return;
       }
 
-      req.user = {
-        id: user.id,
-        email: user.email,
-        role: user.role
-      };
-
+      req.user = user;
       next();
-    } catch (error) {
+    })
+    .catch(error => {
       req.log.warn({ err: error }, 'Failed to authenticate request');
       res.status(401).json({ error: 'Authentication failed.' });
-    }
-  })().catch(error => {
-    req.log.error({ err: error }, 'Unexpected authentication error');
-    res.status(500).json({ error: 'Internal server error.' });
-  });
+    });
 };
 
 const requireSupervisor: express.RequestHandler = (req, res, next) => {
@@ -468,6 +529,61 @@ const requireApiKey: express.RequestHandler = (req, res, next) => {
 
 const port = Number.parseInt(process.env.PORT ?? '3000', 10);
 const host = process.env.HOST ?? '0.0.0.0';
+
+const wss = new WebSocketServer({ server, path: '/ws/latest' });
+
+wss.on('connection', (socket, request) => {
+  (async () => {
+    try {
+      if (!request.url) {
+        socket.close(1008, 'Invalid request.');
+        return;
+      }
+
+      const parsedUrl = new URL(request.url, `http://${request.headers.host ?? 'localhost'}`);
+      const token = parsedUrl.searchParams.get('token');
+
+      if (!token) {
+        socket.close(4401, 'Authentication required.');
+        return;
+      }
+
+      let user: AuthenticatedUser | null = null;
+      try {
+        user = await authenticateToken(token);
+      } catch (error) {
+        appLogger.warn({ err: error }, 'Failed to authenticate WebSocket connection');
+        socket.close(1011, 'Authentication error.');
+        return;
+      }
+
+      if (!user) {
+        socket.close(4401, 'Authentication failed.');
+        return;
+      }
+
+      websocketClients.add(socket);
+
+      if (Object.keys(latestData).length > 0) {
+        socket.send(JSON.stringify({ type: 'init', payload: latestData }));
+      }
+
+      socket.on('close', () => {
+        websocketClients.delete(socket);
+      });
+
+      socket.on('error', error => {
+        appLogger.warn({ err: error }, 'WebSocket error');
+      });
+    } catch (error) {
+      appLogger.error({ err: error }, 'Unexpected WebSocket setup error');
+      socket.close(1011, 'Unexpected error.');
+    }
+  })().catch(error => {
+    appLogger.error({ err: error }, 'Unhandled WebSocket connection error');
+    socket.close(1011, 'Unexpected error.');
+  });
+});
 
 const telegramBot = createTelegramBot(process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_POLLING === 'false');
 const telegramLogger = appLogger.child({ subsystem: 'telegram' });
@@ -676,19 +792,18 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
   const normalized = normalizeSensorPayload(payload, req.log);
   const computedSnapshot = computeSensorSnapshot(normalized, config);
   const serializedSnapshot = serializeComputedSnapshot(computedSnapshot);
-  const existingDisplayName = latestData[deviceID]?.displayName ?? null;
 
-  latestData[deviceID] = {
+  const latestSnapshot = updateLatestData(deviceID, previous => ({
     deviceID,
     amonia: serializedSnapshot.amonia,
     air: serializedSnapshot.air,
     sabun: serializedSnapshot.sabun,
     tisu: serializedSnapshot.tisu,
-    displayName: existingDisplayName,
+    displayName: previous?.displayName ?? null,
     timestamp: new Date().toISOString(),
     espStatus: 'active',
     lastActive: now
-  };
+  }));
 
   if (!deviceStatuses[deviceID]) {
     deviceStatuses[deviceID] = {
@@ -704,7 +819,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
   const status = deviceStatuses[deviceID];
   const lantai = extractFloorFromDeviceID(deviceID);
 
-  const latestSnapshotRecord = toSnapshotRecord(latestData[deviceID]);
+  const latestSnapshotRecord = toSnapshotRecord(latestSnapshot);
   try {
     await latestSnapshotRepository.upsert(latestSnapshotRecord);
   } catch (error) {
@@ -787,18 +902,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
 app.get('/api/latest', authenticateRequest, async (_req: Request, res: Response) => {
   const now = Date.now();
-  const updates: Promise<void>[] = [];
-
-  Object.values(latestData).forEach(entry => {
-    if (now - entry.lastActive > ESP_INACTIVE_THRESHOLD_MS && entry.espStatus !== 'inactive') {
-      entry.espStatus = 'inactive';
-      updates.push(latestSnapshotRepository.updateStatus(entry.deviceID, 'inactive'));
-    }
-  });
-
-  if (updates.length > 0) {
-    await Promise.allSettled(updates);
-  }
+  await markInactiveDevices(now);
 
   res.json(latestData);
 });
@@ -840,10 +944,10 @@ app.post(
       });
 
       if (latestData[deviceId]) {
-        latestData[deviceId] = {
-          ...latestData[deviceId],
+        updateLatestData(deviceId, previous => ({
+          ...previous!,
           displayName
-        };
+        }));
       }
 
       res.status(200).json({ status: 'ok', deviceId, displayName });
@@ -869,7 +973,7 @@ app.use((err: Error, _req: Request, res: Response, next: NextFunction) => {
 
 bootstrap()
   .then(() => {
-    app.listen(port, host, () => {
+    server.listen(port, host, () => {
       appLogger.info(
         { host, port, url: `http://${host === '0.0.0.0' ? 'localhost' : host}:${port}` },
         'Server is running'

@@ -2,8 +2,8 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import DeviceSection from './components/DeviceSection';
 import LoginForm from './components/LoginForm';
 import { AuthenticatedUser, useAuth } from './auth/AuthContext';
-import { buildApiUrl } from './api';
-import { Config, HistoryDataMap, LatestDataMap } from './types';
+import { buildApiUrl, buildWsUrl } from './api';
+import { Config, HistoryDataMap, LatestDataMap, LatestDeviceSnapshot } from './types';
 
 type ConfigMessage = { type: 'success' | 'error'; text: string } | null;
 
@@ -136,10 +136,78 @@ export default function App() {
     if (!token) {
       return;
     }
+
+    let websocket: WebSocket | null = null;
+    let reconnectTimeoutId: number | null = null;
+    let shouldReconnect = true;
+
+    const connect = () => {
+      if (reconnectTimeoutId !== null) {
+        window.clearTimeout(reconnectTimeoutId);
+        reconnectTimeoutId = null;
+      }
+
+      const url = new URL(buildWsUrl('/ws/latest'));
+      url.searchParams.set('token', token);
+
+      const socket = new WebSocket(url.toString());
+      websocket = socket;
+
+      socket.addEventListener('message', event => {
+        if (typeof event.data !== 'string') {
+          return;
+        }
+
+        try {
+          const message = JSON.parse(event.data) as
+            | { type: 'init'; payload: LatestDataMap }
+            | { type: 'snapshot'; payload: LatestDeviceSnapshot };
+
+          if (message.type === 'init') {
+            setLatestData(message.payload);
+          } else if (message.type === 'snapshot') {
+            const snapshot = message.payload;
+            setLatestData(prev => ({ ...prev, [snapshot.deviceID]: snapshot }));
+          }
+        } catch (error) {
+          console.error('Failed to parse WebSocket message:', error);
+        }
+      });
+
+      socket.addEventListener('close', event => {
+        websocket = null;
+        if (event.code === 4401) {
+          shouldReconnect = false;
+          if (reconnectTimeoutId !== null) {
+            window.clearTimeout(reconnectTimeoutId);
+            reconnectTimeoutId = null;
+          }
+          handleUnauthorized();
+          return;
+        }
+
+        if (shouldReconnect) {
+          reconnectTimeoutId = window.setTimeout(connect, 2000);
+        }
+      });
+
+      socket.addEventListener('error', event => {
+        console.error('WebSocket error:', event);
+        socket.close();
+      });
+    };
+
     loadRealtimeData();
-    const intervalId = window.setInterval(loadRealtimeData, 1000);
-    return () => window.clearInterval(intervalId);
-  }, [token, loadRealtimeData]);
+    connect();
+
+    return () => {
+      shouldReconnect = false;
+      if (reconnectTimeoutId !== null) {
+        window.clearTimeout(reconnectTimeoutId);
+      }
+      websocket?.close();
+    };
+  }, [token, loadRealtimeData, handleUnauthorized]);
 
   useEffect(() => {
     if (!token || !config) {
