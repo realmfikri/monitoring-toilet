@@ -15,6 +15,9 @@ interface DeviceSectionProps {
   displayName?: string | null;
   canRename?: boolean;
   onRename?: (deviceId: string, newName: string | null) => Promise<void>;
+  onLoadMoreHistory?: () => void;
+  hasMoreHistory?: boolean;
+  isLoadingHistory?: boolean;
 }
 
 interface AggregatedSoapStatus {
@@ -50,7 +53,10 @@ export default function DeviceSection({
   onDownloadHistory,
   displayName: displayNameProp,
   canRename = false,
-  onRename
+  onRename,
+  onLoadMoreHistory,
+  hasMoreHistory = false,
+  isLoadingHistory = false
 }: DeviceSectionProps) {
   const formattedDeviceId = formatDeviceDisplayId(deviceId);
   const effectiveDisplayName = (displayNameProp ?? data?.displayName ?? null) ?? formattedDeviceId;
@@ -60,7 +66,7 @@ export default function DeviceSection({
       return null;
     }
     const amonia = safeParse<AmmoniaSensorData>(data.amonia, DEFAULT_AMMONIA);
-    const water = safeParse<WaterSensorData>(data.air, DEFAULT_WATER);
+    const water = safeParse<WaterSensorData>(data.waterPuddleJson, DEFAULT_WATER);
     const soap = safeParse<SoapSensorData>(data.sabun, DEFAULT_SOAP);
     const tissue = safeParse<TissueSensorData>(data.tisu, DEFAULT_TISSUE);
 
@@ -77,7 +83,7 @@ export default function DeviceSection({
     };
   }, [data]);
 
-  const recentHistory = useMemo(() => history.slice(-24).reverse(), [history]);
+  const historyRows = useMemo(() => history, [history]);
 
   const handleRenameClick = useCallback(async () => {
     if (!canRename || !onRename) {
@@ -182,12 +188,12 @@ export default function DeviceSection({
             </tr>
           </thead>
           <tbody>
-            {recentHistory.length === 0 ? (
+            {historyRows.length === 0 ? (
               <tr>
                 <td colSpan={6}>Belum ada data historis.</td>
               </tr>
             ) : (
-              recentHistory.map((snapshot, index) => {
+              historyRows.map((snapshot, index) => {
                 try {
                   const summary = interpretSnapshot(snapshot);
                   return (
@@ -212,6 +218,16 @@ export default function DeviceSection({
             )}
           </tbody>
         </table>
+        {hasMoreHistory && onLoadMoreHistory ? (
+          <button
+            type="button"
+            className="loadMoreButton"
+            onClick={onLoadMoreHistory}
+            disabled={isLoadingHistory}
+          >
+            {isLoadingHistory ? 'Memuat...' : 'Muat lebih banyak'}
+          </button>
+        ) : null}
       </div>
     </section>
   );
@@ -219,7 +235,7 @@ export default function DeviceSection({
 
 function interpretSnapshot(snapshot: LatestDeviceSnapshot) {
   const amonia = safeParse<AmmoniaSensorData>(snapshot.amonia, DEFAULT_AMMONIA);
-  const water = safeParse<WaterSensorData>(snapshot.air, DEFAULT_WATER);
+  const water = safeParse<WaterSensorData>(snapshot.waterPuddleJson, DEFAULT_WATER);
   const soap = safeParse<SoapSensorData>(snapshot.sabun, DEFAULT_SOAP);
   const tissue = safeParse<TissueSensorData>(snapshot.tisu, DEFAULT_TISSUE);
 

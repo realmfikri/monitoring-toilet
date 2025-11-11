@@ -78,7 +78,7 @@ interface PetugasAssignment {
 const rawSensorPayloadSchema = z.object({
   deviceID: z.string().trim().min(1, 'deviceID is required'),
   amonia: z.unknown().optional(),
-  air: z.unknown().optional(),
+  waterPuddleJson: z.unknown().optional(),
   sabun: z.unknown().optional(),
   tisu: z.unknown().optional()
 });
@@ -89,7 +89,7 @@ interface LatestDeviceSnapshot {
   deviceID: string;
   displayName: string | null;
   amonia: string;
-  air: string;
+  waterPuddleJson: string;
   sabun: string;
   tisu: string;
   timestamp: string;
@@ -168,14 +168,14 @@ interface RawTissuePayload {
 interface NormalizedSensorPayload {
   deviceID: string;
   amonia: RawAmmoniaPayload;
-  air: RawWaterPayload;
+  waterPuddleJson: RawWaterPayload;
   sabun: RawSoapPayload;
   tisu: RawTissuePayload;
 }
 
 interface ComputedSensorSnapshot {
   amonia: AmmoniaSensorData;
-  air: WaterSensorData;
+  waterPuddle: WaterSensorData;
   sabun: SoapSensorData;
   tisu: TissueSensorData;
 }
@@ -797,7 +797,11 @@ if (telegramBot) {
       }
 
       const amonia = parseJson<AmmoniaSensorData>(data.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' }, telegramLogger);
-      const water = parseJson<WaterSensorData>(data.air, { digital: -1, status: 'Data tidak ada' }, telegramLogger);
+      const water = parseJson<WaterSensorData>(
+        data.waterPuddleJson,
+        { digital: -1, status: 'Data tidak ada' },
+        telegramLogger
+      );
       const soap = parseJson<SoapSensorData>(data.sabun, defaultSoapData(), telegramLogger);
       const tissue = parseJson<TissueSensorData>(data.tisu, defaultTissueData(), telegramLogger);
       const timestamp = new Date(data.timestamp).toLocaleString();
@@ -978,7 +982,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
   const latestSnapshot = updateLatestData(deviceID, previous => ({
     deviceID,
     amonia: serializedSnapshot.amonia,
-    air: serializedSnapshot.air,
+    waterPuddleJson: serializedSnapshot.waterPuddleJson,
     sabun: serializedSnapshot.sabun,
     tisu: serializedSnapshot.tisu,
     displayName: previous?.displayName ?? null,
@@ -1149,18 +1153,44 @@ app.get('/api/latest', authenticateRequest, async (_req: Request, res: Response)
   res.json(latestData);
 });
 
+const historyQuerySchema = z.object({
+  deviceId: z.string().trim().min(1, 'deviceId is required'),
+  limit: z.coerce.number().int().positive().max(200).optional(),
+  cursor: z.string().optional()
+});
+
 app.get('/api/history', authenticateRequest, async (req: Request, res: Response) => {
-  try {
-    const groupedHistory = await historyRepository.findAllGrouped();
-    const allHistory: Record<string, LatestDeviceSnapshot[]> = {};
+  const parseResult = historyQuerySchema.safeParse(req.query);
+  if (!parseResult.success) {
+    res.status(400).json({ error: 'Invalid query parameters.', details: parseResult.error.flatten() });
+    return;
+  }
 
-    for (const [deviceId, entries] of groupedHistory.entries()) {
-      allHistory[deviceId] = entries.map(toLatestDeviceSnapshot);
+  const { deviceId, cursor } = parseResult.data;
+  const limit = parseResult.data.limit ?? 25;
+
+  let cursorValue: bigint | undefined;
+  if (cursor) {
+    try {
+      cursorValue = BigInt(cursor);
+    } catch (error) {
+      res.status(400).json({ error: 'Invalid cursor parameter.' });
+      return;
     }
+  }
 
-    res.json(allHistory);
+  try {
+    const { entries, nextCursor } = await historyRepository.findPaginatedByDevice(deviceId, limit, cursorValue);
+    const responsePayload = {
+      deviceId,
+      entries: entries.map(toLatestDeviceSnapshot),
+      nextCursor: nextCursor ? nextCursor.toString() : null,
+      hasMore: Boolean(nextCursor)
+    };
+
+    res.json(responsePayload);
   } catch (error) {
-    req.log.error({ err: error }, 'Error reading historical data');
+    req.log.error({ err: error, deviceId }, 'Error reading historical data');
     res.status(500).send('No historical data available.');
   }
 });
@@ -1241,7 +1271,7 @@ function normalizeSensorPayload(payload: RawSensorPayload, logger: Logger): Norm
   return {
     deviceID: payload.deviceID,
     amonia: normalizeAmmoniaPayload(payload.amonia, logger),
-    air: normalizeWaterPayload(payload.air, logger),
+    waterPuddleJson: normalizeWaterPayload(payload.waterPuddleJson, logger),
     sabun: normalizeSoapPayload(payload.sabun, logger),
     tisu: normalizeTissuePayload(payload.tisu, logger)
   };
@@ -1250,16 +1280,18 @@ function normalizeSensorPayload(payload: RawSensorPayload, logger: Logger): Norm
 function computeSensorSnapshot(payload: NormalizedSensorPayload, config: ConfigBase): ComputedSensorSnapshot {
   return {
     amonia: computeAmmoniaStatus(payload.amonia, config.ammoniaLimits),
-    air: computeWaterStatus(payload.air),
+    waterPuddle: computeWaterStatus(payload.waterPuddleJson),
     sabun: computeSoapStatus(payload.sabun, config.soapEmptyThresholdCm),
     tisu: computeTissueStatus(payload.tisu, config.tissueEmptyValue)
   };
 }
 
-function serializeComputedSnapshot(snapshot: ComputedSensorSnapshot): Pick<LatestDeviceSnapshot, 'amonia' | 'air' | 'sabun' | 'tisu'> {
+function serializeComputedSnapshot(
+  snapshot: ComputedSensorSnapshot
+): Pick<LatestDeviceSnapshot, 'amonia' | 'waterPuddleJson' | 'sabun' | 'tisu'> {
   return {
     amonia: JSON.stringify(snapshot.amonia),
-    air: JSON.stringify(snapshot.air),
+    waterPuddleJson: JSON.stringify(snapshot.waterPuddle),
     sabun: JSON.stringify(snapshot.sabun),
     tisu: JSON.stringify(snapshot.tisu)
   };
@@ -1489,7 +1521,7 @@ function toSnapshotRecord(snapshot: LatestDeviceSnapshot): SnapshotRecord {
     deviceId: snapshot.deviceID,
     displayName: snapshot.displayName ?? null,
     amonia: snapshot.amonia,
-    air: snapshot.air,
+    waterPuddleJson: snapshot.waterPuddleJson,
     sabun: snapshot.sabun,
     tisu: snapshot.tisu,
     timestamp: new Date(snapshot.timestamp),
@@ -1503,7 +1535,7 @@ function toLatestDeviceSnapshot(record: SnapshotRecord): LatestDeviceSnapshot {
     deviceID: record.deviceId,
     displayName: record.displayName,
     amonia: record.amonia,
-    air: record.air,
+    waterPuddleJson: record.waterPuddleJson,
     sabun: record.sabun,
     tisu: record.tisu,
     timestamp: record.timestamp.toISOString(),
@@ -1649,7 +1681,11 @@ function sendTelegramAlert(
 
   const logger = context.logger ?? appLogger;
   const amonia = parseJson<AmmoniaSensorData>(sensorData.amonia, { ppm: null, score: null, status: 'Data tidak ada' }, logger);
-  const water = parseJson<WaterSensorData>(sensorData.air, { digital: -1, status: 'Data tidak ada' }, logger);
+  const water = parseJson<WaterSensorData>(
+    sensorData.waterPuddleJson,
+    { digital: -1, status: 'Data tidak ada' },
+    logger
+  );
   const soap = parseJson<SoapSensorData>(sensorData.sabun, defaultSoapData(), logger);
   const tissue = parseJson<TissueSensorData>(sensorData.tisu, defaultTissueData(), logger);
   const timestamp = new Date(sensorData.timestamp).toLocaleString();

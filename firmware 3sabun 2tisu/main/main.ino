@@ -325,7 +325,7 @@ void kirimDataKeServer() {
             StaticJsonDocument<768> doc;
             doc["deviceID"] = custom_device_id.getValue();
             doc["amonia"] = getAmoniaDataJson();
-            doc["air"] = getWaterDataJson();
+            doc["waterPuddleJson"] = getWaterDataJson();
             doc["sabun"] = getSoapDataJson();
             doc["tisu"] = getTissueDataJson();
             doc["espStatus"] = "active";

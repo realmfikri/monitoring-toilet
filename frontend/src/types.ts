@@ -18,7 +18,7 @@ export interface LatestDeviceSnapshot {
   deviceID: string;
   displayName: string | null;
   amonia: string;
-  air: string;
+  waterPuddleJson: string;
   sabun: string;
   tisu: string;
   timestamp: string;
@@ -60,3 +60,10 @@ export interface TissueSensorSlot {
 
 export type LatestDataMap = Record<string, LatestDeviceSnapshot>;
 export type HistoryDataMap = Record<string, LatestDeviceSnapshot[]>;
+
+export interface DeviceHistoryResponse {
+  deviceId: string;
+  entries: LatestDeviceSnapshot[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
