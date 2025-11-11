@@ -6,13 +6,12 @@ import express, { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import type { JwtPayload, Secret, SignOptions } from 'jsonwebtoken';
-import type { StringValue } from 'ms';
 import TelegramBot from 'node-telegram-bot-api';
 import pinoHttp from 'pino-http';
 import type { Logger } from 'pino';
 import { z } from 'zod';
 
-import type { UserRole } from '@prisma/client';
+import type { $Enums } from '@prisma/client';
 
 import { appConfig, getConfiguredApiKeys, isAllowedOrigin, isValidApiKey } from './config';
 import { prisma } from './database/prismaClient';
@@ -22,6 +21,8 @@ import { HistoryRepository } from './repositories/historyRepository';
 import { LatestSnapshotRepository } from './repositories/latestSnapshotRepository';
 import { TelegramSubscriberRepository } from './repositories/telegramSubscriberRepository';
 import type { SnapshotRecord } from './repositories/types';
+
+type UserRole = $Enums.UserRole;
 
 interface AuthenticatedUser {
   id: string;
@@ -71,6 +72,7 @@ type RawSensorPayload = z.infer<typeof rawSensorPayloadSchema>;
 
 interface LatestDeviceSnapshot {
   deviceID: string;
+  displayName: string | null;
   amonia: string;
   air: string;
   sabun: string;
@@ -280,6 +282,24 @@ const loginSchema = z.object({
     .email('Email must be valid.')
     .transform(value => value.toLowerCase()),
   password: z.string({ required_error: 'Password is required.' }).min(1, 'Password is required.')
+});
+
+const renameDeviceSchema = z.object({
+  displayName: z
+    .union([z.string(), z.null()])
+    .transform(value => {
+      if (value === null) {
+        return null;
+      }
+      const trimmed = value.trim();
+      if (trimmed.length === 0) {
+        return null;
+      }
+      return trimmed;
+    })
+    .refine(value => value === null || value.length <= 100, {
+      message: 'Display name must be at most 100 characters.'
+    })
 });
 
 async function verifyUserCredentials(email: string, password: string): Promise<AuthenticatedUser | null> {
@@ -497,7 +517,7 @@ app.post('/api/login', async (req: Request, res: Response) => {
     }
 
     const signOptions: SignOptions = {
-      expiresIn: authTokenExpiration as StringValue | number,
+      expiresIn: authTokenExpiration,
       subject: user.id
     };
 
@@ -561,9 +581,11 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
   const now = Date.now();
   const normalized = normalizeSensorPayload(payload, req.log);
+  const existingDisplayName = latestData[deviceID]?.displayName ?? null;
 
   latestData[deviceID] = {
     ...normalized,
+    displayName: existingDisplayName,
     timestamp: new Date().toISOString(),
     espStatus: 'active',
     lastActive: now
@@ -700,6 +722,46 @@ app.get('/api/history', authenticateRequest, async (req: Request, res: Response)
   }
 });
 
+app.post(
+  '/api/device/:deviceId/rename',
+  authenticateRequest,
+  requireSupervisor,
+  async (req: Request, res: Response) => {
+    const { deviceId } = req.params;
+    const parseResult = renameDeviceSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      res.status(400).json({ error: 'Invalid display name payload.', details: parseResult.error.flatten() });
+      return;
+    }
+
+    const { displayName } = parseResult.data;
+
+    try {
+      await prisma.deviceLatestSnapshot.update({
+        where: { deviceId },
+        data: { displayName }
+      });
+
+      if (latestData[deviceId]) {
+        latestData[deviceId] = {
+          ...latestData[deviceId],
+          displayName
+        };
+      }
+
+      res.status(200).json({ status: 'ok', deviceId, displayName });
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P2025') {
+        res.status(404).json({ error: 'Device not found.' });
+        return;
+      }
+
+      req.log.error({ err: error, deviceId }, 'Failed to update device display name');
+      res.status(500).json({ error: 'Failed to update device display name.' });
+    }
+  }
+);
+
 app.use((err: Error, _req: Request, res: Response, next: NextFunction) => {
   if (err.message === 'Origin header is required.' || err.message.includes('is not allowed')) {
     res.status(403).json({ error: err.message });
@@ -735,7 +797,7 @@ function deriveConfig(input: ConfigBase): Config {
 function normalizeSensorPayload(
   payload: RawSensorPayload,
   logger: Logger
-): Omit<LatestDeviceSnapshot, 'timestamp' | 'espStatus' | 'lastActive'> {
+): Omit<LatestDeviceSnapshot, 'timestamp' | 'espStatus' | 'lastActive' | 'displayName'> {
   return {
     deviceID: payload.deviceID,
     amonia: stringifyIfNeeded(payload.amonia, logger),
@@ -774,6 +836,7 @@ function extractFloorFromDeviceID(deviceID: string): number {
 function toSnapshotRecord(snapshot: LatestDeviceSnapshot): SnapshotRecord {
   return {
     deviceId: snapshot.deviceID,
+    displayName: snapshot.displayName ?? null,
     amonia: snapshot.amonia,
     air: snapshot.air,
     sabun: snapshot.sabun,
@@ -787,6 +850,7 @@ function toSnapshotRecord(snapshot: LatestDeviceSnapshot): SnapshotRecord {
 function toLatestDeviceSnapshot(record: SnapshotRecord): LatestDeviceSnapshot {
   return {
     deviceID: record.deviceId,
+    displayName: record.displayName,
     amonia: record.amonia,
     air: record.air,
     sabun: record.sabun,

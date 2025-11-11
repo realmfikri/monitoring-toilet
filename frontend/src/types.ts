@@ -8,6 +8,7 @@ export type EspStatus = 'active' | 'inactive';
 
 export interface LatestDeviceSnapshot {
   deviceID: string;
+  displayName: string | null;
   amonia: string;
   air: string;
   sabun: string;

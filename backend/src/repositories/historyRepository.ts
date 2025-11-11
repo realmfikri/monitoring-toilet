@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 import { SnapshotRecord } from './types';
 
@@ -6,6 +6,7 @@ const defaultString = (value: string | null): string => value ?? '';
 
 const mapRowToSnapshot = (row: {
   deviceId: string;
+  displayName: string | null;
   amonia: string | null;
   air: string | null;
   sabun: string | null;
@@ -15,6 +16,7 @@ const mapRowToSnapshot = (row: {
   lastActive: Date;
 }): SnapshotRecord => ({
   deviceId: row.deviceId,
+  displayName: row.displayName,
   amonia: defaultString(row.amonia),
   air: defaultString(row.air),
   sabun: defaultString(row.sabun),
@@ -28,50 +30,55 @@ export class HistoryRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
   async record(snapshot: SnapshotRecord): Promise<void> {
-    await this.prisma.deviceHistory.create({
-      data: {
-        deviceId: snapshot.deviceId,
-        amonia: snapshot.amonia,
-        air: snapshot.air,
-        sabun: snapshot.sabun,
-        tisu: snapshot.tisu,
-        timestamp: snapshot.timestamp,
-        espStatus: snapshot.espStatus,
-        lastActive: snapshot.lastActive
-      }
-    });
+    const data: Prisma.DeviceHistoryUncheckedCreateInput = {
+      deviceId: snapshot.deviceId,
+      displayName: snapshot.displayName ?? null,
+      amonia: snapshot.amonia,
+      air: snapshot.air,
+      sabun: snapshot.sabun,
+      tisu: snapshot.tisu,
+      timestamp: snapshot.timestamp,
+      espStatus: snapshot.espStatus,
+      lastActive: snapshot.lastActive
+    };
+
+    await this.prisma.deviceHistory.create({ data });
   }
 
   async findByDevice(deviceId: string): Promise<SnapshotRecord[]> {
-    const rows = (await this.prisma.deviceHistory.findMany({
+    const rows = await this.prisma.deviceHistory.findMany({
       where: { deviceId },
-      orderBy: { timestamp: 'asc' }
-    })) as Array<{
-      deviceId: string;
-      amonia: string | null;
-      air: string | null;
-      sabun: string | null;
-      tisu: string | null;
-      timestamp: Date;
-      espStatus: SnapshotRecord['espStatus'];
-      lastActive: Date;
-    }>;
+      orderBy: { timestamp: 'asc' },
+      select: {
+        deviceId: true,
+        displayName: true,
+        amonia: true,
+        air: true,
+        sabun: true,
+        tisu: true,
+        timestamp: true,
+        espStatus: true,
+        lastActive: true
+      }
+    });
     return rows.map(mapRowToSnapshot);
   }
 
   async findAllGrouped(): Promise<Map<string, SnapshotRecord[]>> {
-    const rows = (await this.prisma.deviceHistory.findMany({
-      orderBy: [{ deviceId: 'asc' }, { timestamp: 'asc' }]
-    })) as Array<{
-      deviceId: string;
-      amonia: string | null;
-      air: string | null;
-      sabun: string | null;
-      tisu: string | null;
-      timestamp: Date;
-      espStatus: SnapshotRecord['espStatus'];
-      lastActive: Date;
-    }>;
+    const rows = await this.prisma.deviceHistory.findMany({
+      orderBy: [{ deviceId: 'asc' }, { timestamp: 'asc' }],
+      select: {
+        deviceId: true,
+        displayName: true,
+        amonia: true,
+        air: true,
+        sabun: true,
+        tisu: true,
+        timestamp: true,
+        espStatus: true,
+        lastActive: true
+      }
+    });
     const grouped = new Map<string, SnapshotRecord[]>();
     for (const row of rows) {
       const snapshot = mapRowToSnapshot(row);

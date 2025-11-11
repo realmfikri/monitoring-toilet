@@ -206,6 +206,29 @@ h1 {
   text-align: center;
 }
 
+.device-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.renameButton {
+  background-color: #6c757d;
+  border: none;
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: bold;
+  transition: background-color 0.3s ease;
+}
+
+.renameButton:hover {
+  background-color: #545b62;
+}
+
 .top-row {
   display: flex;
   flex-wrap: wrap;

@@ -1,5 +1,6 @@
 export interface SnapshotRecord {
   deviceId: string;
+  displayName: string | null;
   amonia: string;
   air: string;
   sabun: string;
