@@ -6,13 +6,12 @@ import express, { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import type { JwtPayload, Secret, SignOptions } from 'jsonwebtoken';
-import type { StringValue } from 'ms';
 import TelegramBot from 'node-telegram-bot-api';
 import pinoHttp from 'pino-http';
 import type { Logger } from 'pino';
 import { z } from 'zod';
 
-import type { UserRole } from '@prisma/client';
+import type { $Enums } from '@prisma/client';
 
 import { appConfig, getConfiguredApiKeys, isAllowedOrigin, isValidApiKey } from './config';
 import { prisma } from './database/prismaClient';
@@ -22,6 +21,8 @@ import { HistoryRepository } from './repositories/historyRepository';
 import { LatestSnapshotRepository } from './repositories/latestSnapshotRepository';
 import { TelegramSubscriberRepository } from './repositories/telegramSubscriberRepository';
 import type { SnapshotRecord } from './repositories/types';
+
+type UserRole = $Enums.UserRole;
 
 interface AuthenticatedUser {
   id: string;
@@ -516,7 +517,7 @@ app.post('/api/login', async (req: Request, res: Response) => {
     }
 
     const signOptions: SignOptions = {
-      expiresIn: authTokenExpiration as StringValue | number,
+      expiresIn: authTokenExpiration,
       subject: user.id
     };
 
