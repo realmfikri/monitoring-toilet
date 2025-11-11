@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
+import type { IncomingMessage } from 'node:http';
 import bcrypt from 'bcrypt';
 import cors from 'cors';
 import type { CorsOptions } from 'cors';
@@ -205,6 +206,36 @@ const DEFAULT_CONFIG = deriveConfig(DEFAULT_CONFIG_BASE);
 let config: Config = DEFAULT_CONFIG;
 let petugas: Record<string, PetugasAssignment> = {};
 
+interface DeviceMuteEntry {
+  mutedUntil: number;
+  lantai: number;
+  setByName: string;
+  setByChatId: string;
+  reason: string;
+}
+
+interface PendingAlertAction {
+  deviceID: string;
+  lantai: number;
+  chatId: string;
+  messageId: number;
+  sentAt: number;
+  alertType: AlertType;
+  text: string;
+}
+
+interface DeviceAcknowledgement {
+  ackedBy: string;
+  ackedByChatId: string;
+  ackedAt: number;
+  lantai: number;
+  source: 'inline' | 'command';
+}
+
+const deviceMuteState = new Map<string, DeviceMuteEntry>();
+const pendingAlertActions = new Map<string, PendingAlertAction>();
+const deviceAcknowledgements = new Map<string, DeviceAcknowledgement>();
+
 const latestData: Record<string, LatestDeviceSnapshot> = {};
 const websocketClients = new Set<WebSocket>();
 const lastHistoricalSaveTime: Record<string, number> = {};
@@ -267,7 +298,7 @@ async function markInactiveDevices(now = Date.now()): Promise<void> {
 
 const configuredApiKeys = getConfiguredApiKeys();
 const authSecret: Secret = appConfig.auth.secret;
-const authTokenExpiration = appConfig.auth.tokenExpiration;
+const authTokenExpiration: NonNullable<SignOptions['expiresIn']> = appConfig.auth.tokenExpiration;
 if (configuredApiKeys.length === 0) {
   appLogger.warn('No API keys configured. The /data endpoint will reject all submissions.');
 } else {
@@ -532,7 +563,7 @@ const host = process.env.HOST ?? '0.0.0.0';
 
 const wss = new WebSocketServer({ server, path: '/ws/latest' });
 
-wss.on('connection', (socket, request) => {
+wss.on('connection', (socket: WebSocket, request: IncomingMessage) => {
   (async () => {
     try {
       if (!request.url) {
@@ -572,7 +603,7 @@ wss.on('connection', (socket, request) => {
         websocketClients.delete(socket);
       });
 
-      socket.on('error', error => {
+      socket.on('error', (error: Error) => {
         appLogger.warn({ err: error }, 'WebSocket error');
       });
     } catch (error) {
@@ -591,7 +622,121 @@ const telegramLogger = appLogger.child({ subsystem: 'telegram' });
 if (telegramBot) {
   telegramBot.on('message', async msg => {
     const chatID = msg.chat.id.toString();
-    const text = msg.text ?? '';
+    const rawText = msg.text ?? '';
+    const text = rawText.trim();
+    const assignment = petugas[chatID];
+    const userDisplayName = getTelegramUserDisplayName(msg.from);
+
+    if (text.startsWith('/maintenance')) {
+      if (!assignment) {
+        await telegramBot
+          .sendMessage(msg.chat.id, '🚫 Anda belum terdaftar. Gunakan /start untuk mendaftar lantai.')
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send maintenance not-registered notice'));
+        return;
+      }
+
+      const parts = text.split(/\s+/);
+      if (parts.length < 3) {
+        await telegramBot
+          .sendMessage(msg.chat.id, 'Penggunaan: /maintenance <lantai> <menit>.')
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send maintenance usage notice'));
+        return;
+      }
+
+      const lantaiArg = Number.parseInt(parts[1], 10);
+      const minutesArg = Number.parseInt(parts[2], 10);
+      if (Number.isNaN(lantaiArg) || Number.isNaN(minutesArg) || lantaiArg <= 0 || minutesArg <= 0) {
+        await telegramBot
+          .sendMessage(msg.chat.id, '⚠️ Nilai lantai atau menit tidak valid.')
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send maintenance invalid arguments notice'));
+        return;
+      }
+
+      if (assignment.lantai !== lantaiArg) {
+        await telegramBot
+          .sendMessage(msg.chat.id, `Perintah ini hanya dapat digunakan untuk Lantai ${assignment.lantai}.`)
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send maintenance floor mismatch notice'));
+        return;
+      }
+
+      const deviceID = getDeviceIdForFloor(lantaiArg);
+      const muteEntry = muteDevice(deviceID, lantaiArg, minutesArg, userDisplayName, chatID, 'maintenance');
+      telegramLogger.info(
+        { chatID, deviceId: deviceID, lantai: lantaiArg, mutedUntil: muteEntry.mutedUntil, minutes: minutesArg },
+        'Device muted via /maintenance command'
+      );
+
+      const mutedUntilText = new Date(muteEntry.mutedUntil).toLocaleString();
+      try {
+        await telegramBot.sendMessage(
+          msg.chat.id,
+          `🔕 Notifikasi untuk Lantai ${lantaiArg} dimatikan selama ${minutesArg} menit (hingga ${mutedUntilText}).`
+        );
+      } catch (error) {
+        telegramLogger.error({ err: error, chatID }, 'Failed to send maintenance confirmation');
+      }
+      return;
+    }
+
+    if (text.startsWith('/ack')) {
+      if (!assignment) {
+        await telegramBot
+          .sendMessage(msg.chat.id, '🚫 Anda belum terdaftar. Gunakan /start untuk mendaftar lantai.')
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send ack not-registered notice'));
+        return;
+      }
+
+      const parts = text.split(/\s+/);
+      if (parts.length < 2) {
+        await telegramBot
+          .sendMessage(msg.chat.id, 'Penggunaan: /ack <lantai>.')
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send ack usage notice'));
+        return;
+      }
+
+      const lantaiArg = Number.parseInt(parts[1], 10);
+      if (Number.isNaN(lantaiArg) || lantaiArg <= 0) {
+        await telegramBot
+          .sendMessage(msg.chat.id, '⚠️ Nilai lantai tidak valid.')
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send ack invalid arguments notice'));
+        return;
+      }
+
+      if (assignment.lantai !== lantaiArg) {
+        await telegramBot
+          .sendMessage(msg.chat.id, `Perintah ini hanya dapat digunakan untuk Lantai ${assignment.lantai}.`)
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send ack floor mismatch notice'));
+        return;
+      }
+
+      const deviceID = getDeviceIdForFloor(lantaiArg);
+      const acknowledged = await acknowledgeDeviceAlert(
+        telegramBot,
+        deviceID,
+        lantaiArg,
+        userDisplayName,
+        chatID,
+        'command',
+        telegramLogger
+      );
+
+      if (!acknowledged) {
+        await telegramBot
+          .sendMessage(msg.chat.id, `ℹ️ Tidak ada alert aktif untuk Lantai ${lantaiArg} atau sudah diambil petugas lain.`)
+          .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send ack no-alert notice'));
+        return;
+      }
+
+      try {
+        await telegramBot.sendMessage(
+          msg.chat.id,
+          `✅ ${userDisplayName} akan menangani alert di Lantai ${lantaiArg}. Terima kasih!`
+        );
+      } catch (error) {
+        telegramLogger.error({ err: error, chatID }, 'Failed to send ack confirmation');
+      }
+      return;
+    }
 
     if (text === '/start') {
       void telegramBot
@@ -636,7 +781,6 @@ if (telegramBot) {
     }
 
     if (text === '/data') {
-      const assignment = petugas[chatID];
       if (!assignment) {
         telegramBot.sendMessage(msg.chat.id, '🚫 Anda belum terdaftar. Gunakan /start untuk mendaftar lantai.');
         return;
@@ -680,6 +824,44 @@ if (telegramBot) {
     void telegramBot
       .sendMessage(msg.chat.id, 'Maaf, perintah tidak dikenali. Gunakan /start untuk memulai atau /data untuk laporan.')
       .catch(error => telegramLogger.error({ err: error, chatID }, 'Failed to send unknown command notice'));
+  });
+
+  telegramBot.on('callback_query', async query => {
+    const data = query.data ?? '';
+    if (!data.startsWith('ack:')) {
+      return;
+    }
+
+    const ackId = data.slice(4);
+    const pending = pendingAlertActions.get(ackId);
+
+    if (!pending) {
+      await telegramBot
+        .answerCallbackQuery(query.id, { text: 'Alert sudah tidak tersedia atau telah ditangani.' })
+        .catch(error => telegramLogger.error({ err: error }, 'Failed to answer callback for missing alert'));
+      return;
+    }
+
+    const ackedByName = getTelegramUserDisplayName(query.from);
+    const ackedByChatId = query.from.id.toString();
+
+    const acknowledged = await acknowledgeDeviceAlert(
+      telegramBot,
+      pending.deviceID,
+      pending.lantai,
+      ackedByName,
+      ackedByChatId,
+      'inline',
+      telegramLogger
+    );
+
+    const responseText = acknowledged
+      ? `✅ ${ackedByName} akan menangani alert di Lantai ${pending.lantai}.`
+      : 'Alert sudah tidak tersedia atau telah ditangani.';
+
+    await telegramBot
+      .answerCallbackQuery(query.id, { text: responseText })
+      .catch(error => telegramLogger.error({ err: error, chatID: ackedByChatId }, 'Failed to answer acknowledgement callback'));
   });
 }
 
@@ -848,24 +1030,54 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
   if (isAlerting) {
     if (!status.isAlert) {
-      status.isAlert = true;
-      status.alertStartTime = now;
-      status.lastAlertSentTime = now;
-      status.isRecoverySent = false;
-      sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_new', {
-        logger: req.log,
-        requestId: req.requestId
-      });
+      const muteEntry = getActiveMuteEntry(deviceID);
+      if (muteEntry) {
+        req.log.info(
+          {
+            deviceId: deviceID,
+            lantai,
+            mutedUntil: muteEntry.mutedUntil,
+            mutedBy: muteEntry.setByChatId,
+            mutedByName: muteEntry.setByName,
+            reason: muteEntry.reason
+          },
+          'Skipping accident_new alert because device is muted'
+        );
+      } else {
+        status.isAlert = true;
+        status.alertStartTime = now;
+        status.lastAlertSentTime = now;
+        status.isRecoverySent = false;
+        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_new', {
+          logger: req.log,
+          requestId: req.requestId
+        });
+      }
     } else if (
       config.maxReminders > 0 &&
       now - status.lastAlertSentTime >= config.reminderIntervalMs &&
       now - status.alertStartTime < config.maxAlertDurationMs
     ) {
-      status.lastAlertSentTime = now;
-      sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_repeat', {
-        logger: req.log,
-        requestId: req.requestId
-      });
+      const muteEntry = getActiveMuteEntry(deviceID);
+      if (muteEntry) {
+        req.log.info(
+          {
+            deviceId: deviceID,
+            lantai,
+            mutedUntil: muteEntry.mutedUntil,
+            mutedBy: muteEntry.setByChatId,
+            mutedByName: muteEntry.setByName,
+            reason: muteEntry.reason
+          },
+          'Skipping accident_repeat alert because device is muted'
+        );
+      } else {
+        status.lastAlertSentTime = now;
+        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_repeat', {
+          logger: req.log,
+          requestId: req.requestId
+        });
+      }
     }
   } else if (status.isAlert) {
     status.isAlert = false;
@@ -874,10 +1086,25 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
     if (!status.isRecoverySent) {
       status.isRecoverySent = true;
-      sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'recovery', {
-        logger: req.log,
-        requestId: req.requestId
-      });
+      const muteEntry = getActiveMuteEntry(deviceID);
+      if (muteEntry) {
+        req.log.info(
+          {
+            deviceId: deviceID,
+            lantai,
+            mutedUntil: muteEntry.mutedUntil,
+            mutedBy: muteEntry.setByChatId,
+            mutedByName: muteEntry.setByName,
+            reason: muteEntry.reason
+          },
+          'Skipping recovery alert because device is muted'
+        );
+      } else {
+        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'recovery', {
+          logger: req.log,
+          requestId: req.requestId
+        });
+      }
     }
   }
 
@@ -887,10 +1114,25 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
       await historyRepository.record(latestSnapshotRecord);
       lastHistoricalSaveTime[deviceID] = now;
       if (!isAlerting) {
-        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'routine', {
-          logger: req.log,
-          requestId: req.requestId
-        });
+        const muteEntry = getActiveMuteEntry(deviceID);
+        if (muteEntry) {
+        req.log.info(
+          {
+            deviceId: deviceID,
+            lantai,
+            mutedUntil: muteEntry.mutedUntil,
+            mutedBy: muteEntry.setByChatId,
+            mutedByName: muteEntry.setByName,
+            reason: muteEntry.reason
+          },
+          'Skipping routine alert because device is muted'
+        );
+        } else {
+          sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'routine', {
+            logger: req.log,
+            requestId: req.requestId
+          });
+        }
       }
     } catch (err) {
       req.log.error({ err, deviceId: deviceID }, '[Historical Log] Failed to write data');
@@ -1287,6 +1529,107 @@ function getActiveAlerts(_deviceID: string, soapStatusConfirmed: SoapStatus, tis
   return alerts;
 }
 
+function getDeviceIdForFloor(lantai: number): string {
+  return `toilet-lantai-${lantai}`;
+}
+
+function getActiveMuteEntry(deviceID: string): DeviceMuteEntry | undefined {
+  const entry = deviceMuteState.get(deviceID);
+  if (!entry) {
+    return undefined;
+  }
+
+  if (entry.mutedUntil <= Date.now()) {
+    deviceMuteState.delete(deviceID);
+    return undefined;
+  }
+
+  return entry;
+}
+
+function isDeviceMuted(deviceID: string): boolean {
+  return Boolean(getActiveMuteEntry(deviceID));
+}
+
+function muteDevice(
+  deviceID: string,
+  lantai: number,
+  minutes: number,
+  setByName: string,
+  setByChatId: string,
+  reason: string
+): DeviceMuteEntry {
+  const mutedUntil = Date.now() + minutes * 60 * 1000;
+  const entry: DeviceMuteEntry = { mutedUntil, lantai, setByName, setByChatId, reason };
+  deviceMuteState.set(deviceID, entry);
+  return entry;
+}
+
+async function acknowledgeDeviceAlert(
+  bot: TelegramBot,
+  deviceID: string,
+  lantai: number,
+  ackedByName: string,
+  ackedByChatId: string,
+  source: 'inline' | 'command',
+  logger: Logger
+): Promise<boolean> {
+  const ackedAt = Date.now();
+  const relatedEntries = Array.from(pendingAlertActions.entries()).filter(([, entry]) => entry.deviceID === deviceID);
+  const acknowledgementSuffix = `\n\n✅ Diambil oleh ${ackedByName} pada ${new Date(ackedAt).toLocaleString()}.`;
+
+  let updatedAny = false;
+  const editPromises = relatedEntries.map(([ackId, entry]) =>
+    bot
+      .editMessageText(`${entry.text}${acknowledgementSuffix}`, {
+        chat_id: Number(entry.chatId),
+        message_id: entry.messageId,
+        reply_markup: { inline_keyboard: [] }
+      })
+      .then(() => {
+        pendingAlertActions.delete(ackId);
+        updatedAny = true;
+      })
+      .catch(error => {
+        logger.error(
+          { err: error, chatId: entry.chatId, messageId: entry.messageId, deviceId: deviceID },
+          'Failed to update alert message after acknowledgement'
+        );
+      })
+  );
+
+  await Promise.all(editPromises);
+
+  deviceAcknowledgements.set(deviceID, { ackedBy: ackedByName, ackedByChatId, ackedAt, lantai, source });
+  logger.info(
+    { deviceId: deviceID, lantai, ackedByChatId, ackedByName, source, ackedAt, updatedAny },
+    'Alert acknowledged by petugas'
+  );
+
+  if (relatedEntries.length === 0) {
+    return false;
+  }
+
+  return true;
+}
+
+function getTelegramUserDisplayName(user?: TelegramBot.User): string {
+  if (!user) {
+    return 'Petugas';
+  }
+
+  const nameParts = [user.first_name, user.last_name].filter(part => Boolean(part && part.trim().length > 0));
+  if (nameParts.length > 0) {
+    return nameParts.join(' ').trim();
+  }
+
+  if (user.username) {
+    return user.username;
+  }
+
+  return `ID ${user.id}`;
+}
+
 function sendTelegramAlert(
   bot: TelegramBot | null,
   deviceID: string,
@@ -1354,17 +1697,41 @@ function sendTelegramAlert(
 
   const formatDigitalValue = (value: number): string => (value === -1 || !Number.isFinite(value) ? 'N/A' : String(value));
 
-  const statusDetails = [
-    `Bau: ${amonia.status} (${Number.isFinite(amonia.ppm) ? `${amonia.ppm} ppm` : 'Data tidak ada'})`,
-    `Genangan Air: ${water.status} (digital: ${formatDigitalValue(water.digital)})`,
-    `Sabun: ${soapStatusKeseluruhan} (S1: ${soap.sabun1.status}/${formatSoapDistance(soap.sabun1)}, S2: ${soap.sabun2.status}/${formatSoapDistance(soap.sabun2)}, S3: ${soap.sabun3.status}/${formatSoapDistance(soap.sabun3)})`,
-    `Tisu: ${tissueStatusKeseluruhan} (T1: ${tissue.tisu1.status}/${formatDigitalValue(tissue.tisu1.digital)}, T2: ${tissue.tisu2.status}/${formatDigitalValue(tissue.tisu2.digital)})`
-  ].join('\n');
+    const statusDetails = [
+      `Bau: ${amonia.status} (${Number.isFinite(amonia.ppm) ? `${amonia.ppm} ppm` : 'Data tidak ada'})`,
+      `Genangan Air: ${water.status} (digital: ${formatDigitalValue(water.digital)})`,
+      `Sabun: ${soapStatusKeseluruhan} (S1: ${soap.sabun1.status}/${formatSoapDistance(soap.sabun1)}, S2: ${soap.sabun2.status}/${formatSoapDistance(soap.sabun2)}, S3: ${soap.sabun3.status}/${formatSoapDistance(soap.sabun3)})`,
+      `Tisu: ${tissueStatusKeseluruhan} (T1: ${tissue.tisu1.status}/${formatDigitalValue(tissue.tisu1.digital)}, T2: ${tissue.tisu2.status}/${formatDigitalValue(tissue.tisu2.digital)})`
+    ].join('\n');
 
     const requestSuffix = context.requestId ? `\nRequest ID: ${context.requestId}` : '';
 
+    const includeAckButton = type === 'accident_new' || type === 'accident_repeat';
+    const ackId = includeAckButton ? randomUUID() : null;
+    const sendOptions: TelegramBot.SendMessageOptions = {};
+    if (includeAckButton && ackId) {
+      sendOptions.reply_markup = {
+        inline_keyboard: [[{ text: 'Saya akan tangani', callback_data: `ack:${ackId}` }]]
+      };
+    }
+
+    const fullMessage = `${message}${statusDetails}${requestSuffix}`;
+
     bot
-      .sendMessage(Number(chatID), `${message}${statusDetails}${requestSuffix}`)
+      .sendMessage(Number(chatID), fullMessage, sendOptions)
+      .then(sentMessage => {
+        if (includeAckButton && ackId) {
+          pendingAlertActions.set(ackId, {
+            deviceID,
+            lantai,
+            chatId: chatID,
+            messageId: sentMessage.message_id,
+            sentAt: Date.now(),
+            alertType: type,
+            text: fullMessage
+          });
+        }
+      })
       .catch(error => {
         logger.error({ err: error, chatID, deviceId: deviceID, requestId: context.requestId }, 'Failed to send Telegram message');
       });
