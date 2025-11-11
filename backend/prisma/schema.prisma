@@ -21,7 +21,7 @@ model DeviceLatestSnapshot {
   deviceId   String       @id
   displayName String?
   amonia     String?
-  air        String?
+  waterPuddleJson String?
   sabun      String?
   tisu       String?
   timestamp  DateTime
@@ -37,7 +37,7 @@ model DeviceHistory {
   deviceId   String
   displayName String?
   amonia     String?
-  air        String?
+  waterPuddleJson String?
   sabun      String?
   tisu       String?
   timestamp  DateTime   @default(now())

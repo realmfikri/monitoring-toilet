@@ -296,6 +296,27 @@ h1 {
   background-color: #f9f9f9;
 }
 
+.loadMoreButton {
+  background-color: #28a745;
+  border: none;
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: bold;
+  margin-top: 15px;
+  transition: background-color 0.3s ease;
+}
+
+.loadMoreButton:hover {
+  background-color: #218838;
+}
+
+.loadMoreButton:disabled {
+  background-color: #9acfa6;
+  cursor: not-allowed;
+}
+
 @media (max-width: 768px) {
   .card {
     min-width: 160px;

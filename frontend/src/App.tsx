@@ -1,11 +1,17 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DeviceSection from './components/DeviceSection';
 import LoginForm from './components/LoginForm';
 import { AuthenticatedUser, useAuth } from './auth/AuthContext';
 import { buildApiUrl, buildWsUrl } from './api';
-import { Config, HistoryDataMap, LatestDataMap, LatestDeviceSnapshot } from './types';
+import { Config, DeviceHistoryResponse, HistoryDataMap, LatestDataMap, LatestDeviceSnapshot } from './types';
 
 type ConfigMessage = { type: 'success' | 'error'; text: string } | null;
+
+interface DeviceHistoryMeta {
+  nextCursor: string | null;
+  hasMore: boolean;
+  isLoading: boolean;
+}
 
 export default function App() {
   const { token, user, logout } = useAuth();
@@ -23,12 +29,18 @@ export default function App() {
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [latestData, setLatestData] = useState<LatestDataMap>({});
   const [historyData, setHistoryData] = useState<HistoryDataMap>({});
+  const [historyStatus, setHistoryStatus] = useState<Record<string, DeviceHistoryMeta>>({});
   const [sessionMessage, setSessionMessage] = useState<string | null>(null);
+  const deviceIdsRef = useRef<string[]>([]);
+  const historyStatusRef = useRef<Record<string, DeviceHistoryMeta>>({});
 
   const handleLogout = useCallback(() => {
     setConfig(null);
     setLatestData({});
     setHistoryData({});
+    setHistoryStatus({});
+    deviceIdsRef.current = [];
+    historyStatusRef.current = {};
     setConfigMessage(null);
     logout();
   }, [logout]);
@@ -101,29 +113,118 @@ export default function App() {
     }
   }, [token, handleUnauthorized]);
 
-  const loadHistoryData = useCallback(async () => {
-    if (!token) {
-      return;
-    }
-    try {
-      const response = await fetch(buildApiUrl('/api/history'), {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
-      if (response.status === 401 || response.status === 403) {
-        handleUnauthorized();
+  const fetchHistoryForDevice = useCallback(
+    async (deviceId: string, cursor?: string | null, append = false) => {
+      if (!token) {
         return;
       }
-      if (!response.ok) {
-        throw new Error(await response.text());
+
+      const previousMeta = historyStatusRef.current[deviceId];
+      const loadingMeta: DeviceHistoryMeta = {
+        nextCursor: previousMeta?.nextCursor ?? null,
+        hasMore: previousMeta?.hasMore ?? false,
+        isLoading: true
+      };
+      historyStatusRef.current = {
+        ...historyStatusRef.current,
+        [deviceId]: loadingMeta
+      };
+      setHistoryStatus(prev => ({
+        ...prev,
+        [deviceId]: loadingMeta
+      }));
+
+      try {
+        const params = new URLSearchParams();
+        params.set('deviceId', deviceId);
+        params.set('limit', '25');
+        if (cursor) {
+          params.set('cursor', cursor);
+        }
+
+        const response = await fetch(buildApiUrl(`/api/history?${params.toString()}`), {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          const previousMeta = historyStatusRef.current[deviceId];
+          const updatedMeta: DeviceHistoryMeta = {
+            nextCursor: previousMeta?.nextCursor ?? null,
+            hasMore: previousMeta?.hasMore ?? false,
+            isLoading: false
+          };
+          historyStatusRef.current = {
+            ...historyStatusRef.current,
+            [deviceId]: updatedMeta
+          };
+          setHistoryStatus(prev => ({
+            ...prev,
+            [deviceId]: updatedMeta
+          }));
+          handleUnauthorized();
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+
+        const data: DeviceHistoryResponse = await response.json();
+
+        setHistoryData(prev => {
+          const existingEntries = prev[deviceId] ?? [];
+          const nextEntries = append
+            ? [...existingEntries, ...data.entries]
+            : (() => {
+                if (existingEntries.length === 0) {
+                  return data.entries;
+                }
+                const seenTimestamps = new Set(data.entries.map(entry => entry.timestamp));
+                const preserved = existingEntries.filter(entry => !seenTimestamps.has(entry.timestamp));
+                return [...data.entries, ...preserved];
+              })();
+          return { ...prev, [deviceId]: nextEntries };
+        });
+
+        const successMeta: DeviceHistoryMeta = {
+          nextCursor: data.nextCursor,
+          hasMore: data.hasMore,
+          isLoading: false
+        };
+        historyStatusRef.current = {
+          ...historyStatusRef.current,
+          [deviceId]: successMeta
+        };
+        setHistoryStatus(prev => ({
+          ...prev,
+          [deviceId]: successMeta
+        }));
+      } catch (error) {
+        console.error('Error fetching historical data:', error);
+        const previousMeta = historyStatusRef.current[deviceId];
+        const fallbackMeta: DeviceHistoryMeta = {
+          nextCursor: previousMeta?.nextCursor ?? null,
+          hasMore: previousMeta?.hasMore ?? false,
+          isLoading: false
+        };
+        historyStatusRef.current = {
+          ...historyStatusRef.current,
+          [deviceId]: fallbackMeta
+        };
+        setHistoryStatus(prev => ({
+          ...prev,
+          [deviceId]: fallbackMeta
+        }));
       }
-      const data: HistoryDataMap = await response.json();
-      setHistoryData(data);
-    } catch (error) {
-      console.error('Error fetching historical data:', error);
-    }
-  }, [token, handleUnauthorized]);
+    },
+    [token, handleUnauthorized]
+  );
+
+  useEffect(() => {
+    historyStatusRef.current = historyStatus;
+  }, [historyStatus]);
 
   useEffect(() => {
     if (!token) {
@@ -213,11 +314,22 @@ export default function App() {
     if (!token || !config) {
       return;
     }
-    loadHistoryData();
+
+    const refreshHistory = () => {
+      deviceIdsRef.current.forEach(deviceId => {
+        const status = historyStatusRef.current[deviceId];
+        if (status?.isLoading) {
+          return;
+        }
+        void fetchHistoryForDevice(deviceId);
+      });
+    };
+
+    refreshHistory();
     const intervalMs = Math.max(config.historicalIntervalMinutes, 1) * 60 * 1000;
-    const intervalId = window.setInterval(loadHistoryData, intervalMs);
+    const intervalId = window.setInterval(refreshHistory, intervalMs);
     return () => window.clearInterval(intervalId);
-  }, [token, config, loadHistoryData]);
+  }, [token, config, fetchHistoryForDevice]);
 
   useEffect(() => {
     if (token) {
@@ -292,6 +404,23 @@ export default function App() {
     return Array.from(ids).sort();
   }, [latestData, historyData]);
 
+  useEffect(() => {
+    deviceIdsRef.current = deviceIds;
+  }, [deviceIds]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+    deviceIds.forEach(deviceId => {
+      const hasHistory = historyData[deviceId] !== undefined;
+      const status = historyStatusRef.current[deviceId];
+      if (!hasHistory && !status?.isLoading) {
+        void fetchHistoryForDevice(deviceId);
+      }
+    });
+  }, [token, deviceIds, fetchHistoryForDevice, historyData]);
+
   const userRoleLabel = useMemo(() => {
     if (!user) {
       return '';
@@ -336,6 +465,17 @@ export default function App() {
       return null;
     },
     [latestData, historyData]
+  );
+
+  const handleLoadMoreHistory = useCallback(
+    (deviceId: string) => {
+      const meta = historyStatus[deviceId];
+      if (!meta || !meta.hasMore || meta.isLoading || !meta.nextCursor) {
+        return;
+      }
+      void fetchHistoryForDevice(deviceId, meta.nextCursor, true);
+    },
+    [fetchHistoryForDevice, historyStatus]
   );
 
   const handleDownloadHistory = useCallback(
@@ -533,18 +673,24 @@ export default function App() {
         {deviceIds.length === 0 ? (
           <p className="empty-state">Belum ada data perangkat untuk ditampilkan.</p>
         ) : (
-          deviceIds.map(deviceId => (
-            <DeviceSection
-              key={deviceId}
-              deviceId={deviceId}
-              data={latestData[deviceId]}
-              history={historyData[deviceId] ?? []}
-              displayName={resolveDisplayName(deviceId)}
-              canRename={isSupervisor}
-              onRename={isSupervisor ? handleRenameDevice : undefined}
-              onDownloadHistory={() => handleDownloadHistory(deviceId)}
-            />
-          ))
+          deviceIds.map(deviceId => {
+            const historyMeta = historyStatus[deviceId];
+            return (
+              <DeviceSection
+                key={deviceId}
+                deviceId={deviceId}
+                data={latestData[deviceId]}
+                history={historyData[deviceId] ?? []}
+                displayName={resolveDisplayName(deviceId)}
+                canRename={isSupervisor}
+                onRename={isSupervisor ? handleRenameDevice : undefined}
+                onDownloadHistory={() => handleDownloadHistory(deviceId)}
+                onLoadMoreHistory={historyMeta?.hasMore ? () => handleLoadMoreHistory(deviceId) : undefined}
+                hasMoreHistory={historyMeta?.hasMore ?? false}
+                isLoadingHistory={historyMeta?.isLoading ?? false}
+              />
+            );
+          })
         )}
       </div>
     </div>
@@ -569,10 +715,10 @@ function convertHistoryToCsv(
 
   const defaultLabel = normalizeDisplayName(displayName) ?? deviceId;
 
-  history.forEach(entry => {
+  [...history].reverse().forEach(entry => {
     try {
       const amonia = JSON.parse(entry.amonia);
-      const water = JSON.parse(entry.air);
+      const water = JSON.parse(entry.waterPuddleJson);
       const soap = JSON.parse(entry.sabun);
       const tissue = JSON.parse(entry.tisu);
 

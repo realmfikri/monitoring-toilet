@@ -4,21 +4,24 @@ import { SnapshotRecord } from './types';
 
 const defaultString = (value: string | null): string => value ?? '';
 
-const mapRowToSnapshot = (row: {
+type HistoryRow = {
+  id: bigint;
   deviceId: string;
   displayName: string | null;
   amonia: string | null;
-  air: string | null;
+  waterPuddleJson: string | null;
   sabun: string | null;
   tisu: string | null;
   timestamp: Date;
   espStatus: SnapshotRecord['espStatus'];
   lastActive: Date;
-}): SnapshotRecord => ({
+};
+
+const mapRowToSnapshot = (row: HistoryRow): SnapshotRecord => ({
   deviceId: row.deviceId,
   displayName: row.displayName,
   amonia: defaultString(row.amonia),
-  air: defaultString(row.air),
+  waterPuddleJson: defaultString(row.waterPuddleJson),
   sabun: defaultString(row.sabun),
   tisu: defaultString(row.tisu),
   timestamp: row.timestamp,
@@ -34,7 +37,7 @@ export class HistoryRepository {
       deviceId: snapshot.deviceId,
       displayName: snapshot.displayName ?? null,
       amonia: snapshot.amonia,
-      air: snapshot.air,
+      waterPuddleJson: snapshot.waterPuddleJson,
       sabun: snapshot.sabun,
       tisu: snapshot.tisu,
       timestamp: snapshot.timestamp,
@@ -50,10 +53,11 @@ export class HistoryRepository {
       where: { deviceId },
       orderBy: { timestamp: 'asc' },
       select: {
+        id: true,
         deviceId: true,
         displayName: true,
         amonia: true,
-        air: true,
+        waterPuddleJson: true,
         sabun: true,
         tisu: true,
         timestamp: true,
@@ -64,14 +68,27 @@ export class HistoryRepository {
     return rows.map(mapRowToSnapshot);
   }
 
-  async findAllGrouped(): Promise<Map<string, SnapshotRecord[]>> {
+  async findPaginatedByDevice(
+    deviceId: string,
+    limit: number,
+    cursor?: bigint
+  ): Promise<{ entries: SnapshotRecord[]; nextCursor: bigint | null }> {
     const rows = await this.prisma.deviceHistory.findMany({
-      orderBy: [{ deviceId: 'asc' }, { timestamp: 'asc' }],
+      where: {
+        deviceId,
+        ...(cursor ? { id: { lt: cursor } } : {})
+      },
+      orderBy: [
+        { timestamp: 'desc' },
+        { id: 'desc' }
+      ],
+      take: limit,
       select: {
+        id: true,
         deviceId: true,
         displayName: true,
         amonia: true,
-        air: true,
+        waterPuddleJson: true,
         sabun: true,
         tisu: true,
         timestamp: true,
@@ -79,15 +96,11 @@ export class HistoryRepository {
         lastActive: true
       }
     });
-    const grouped = new Map<string, SnapshotRecord[]>();
-    for (const row of rows) {
-      const snapshot = mapRowToSnapshot(row);
-      if (!grouped.has(snapshot.deviceId)) {
-        grouped.set(snapshot.deviceId, []);
-      }
-      grouped.get(snapshot.deviceId)!.push(snapshot);
-    }
-    return grouped;
+
+    const entries = rows.map(mapRowToSnapshot);
+    const nextCursor = rows.length === limit ? rows[rows.length - 1].id : null;
+
+    return { entries, nextCursor };
   }
 
   async getLatestTimestamps(): Promise<Record<string, Date>> {

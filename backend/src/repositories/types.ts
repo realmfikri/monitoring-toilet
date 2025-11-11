@@ -2,7 +2,7 @@ export interface SnapshotRecord {
   deviceId: string;
   displayName: string | null;
   amonia: string;
-  air: string;
+  waterPuddleJson: string;
   sabun: string;
   tisu: string;
   timestamp: Date;
