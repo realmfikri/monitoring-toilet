@@ -13,7 +13,11 @@ export default function App() {
   const [configForm, setConfigForm] = useState({
     historicalIntervalMinutes: '5',
     reminderIntervalMinutes: '10',
-    maxReminders: '3'
+    maxReminders: '3',
+    soapEmptyThresholdCm: '10',
+    tissueEmptyValue: '0',
+    ammoniaGoodMax: '1.5',
+    ammoniaWarningMax: '3'
   });
   const [configMessage, setConfigMessage] = useState<ConfigMessage>(null);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
@@ -61,7 +65,11 @@ export default function App() {
       setConfigForm({
         historicalIntervalMinutes: String(data.historicalIntervalMinutes),
         reminderIntervalMinutes: String(data.reminderIntervalMinutes),
-        maxReminders: String(data.maxReminders)
+        maxReminders: String(data.maxReminders),
+        soapEmptyThresholdCm: String(data.soapEmptyThresholdCm),
+        tissueEmptyValue: String(data.tissueEmptyValue),
+        ammoniaGoodMax: String(data.ammoniaLimits.goodMax),
+        ammoniaWarningMax: String(data.ammoniaLimits.warningMax)
       });
     } catch (error) {
       console.error('Error loading configuration:', error);
@@ -163,10 +171,16 @@ export default function App() {
       return;
     }
     try {
-      const payload = {
+      const payload: Config = {
         historicalIntervalMinutes: Number.parseInt(configForm.historicalIntervalMinutes, 10),
         reminderIntervalMinutes: Number.parseInt(configForm.reminderIntervalMinutes, 10),
-        maxReminders: Number.parseInt(configForm.maxReminders, 10)
+        maxReminders: Number.parseInt(configForm.maxReminders, 10),
+        soapEmptyThresholdCm: Number.parseFloat(configForm.soapEmptyThresholdCm),
+        tissueEmptyValue: Number.parseInt(configForm.tissueEmptyValue, 10),
+        ammoniaLimits: {
+          goodMax: Number.parseFloat(configForm.ammoniaGoodMax),
+          warningMax: Number.parseFloat(configForm.ammoniaWarningMax)
+        }
       };
 
       const response = await fetch(buildApiUrl('/api/config'), {
@@ -393,6 +407,46 @@ export default function App() {
               onChange={handleConfigInputChange('maxReminders')}
             />
 
+            <label htmlFor="soapThreshold">Ambang Sabun Kosong (cm):</label>
+            <input
+              type="number"
+              id="soapThreshold"
+              min={0}
+              step="0.1"
+              value={configForm.soapEmptyThresholdCm}
+              onChange={handleConfigInputChange('soapEmptyThresholdCm')}
+            />
+
+            <label htmlFor="tissueEmptyValue">Nilai Digital Tisu Saat Habis (0 atau 1):</label>
+            <input
+              type="number"
+              id="tissueEmptyValue"
+              min={0}
+              max={1}
+              value={configForm.tissueEmptyValue}
+              onChange={handleConfigInputChange('tissueEmptyValue')}
+            />
+
+            <label htmlFor="ammoniaGood">Ambang Amonia (ppm) - Batas Aman:</label>
+            <input
+              type="number"
+              id="ammoniaGood"
+              min={0}
+              step="0.1"
+              value={configForm.ammoniaGoodMax}
+              onChange={handleConfigInputChange('ammoniaGoodMax')}
+            />
+
+            <label htmlFor="ammoniaWarning">Ambang Amonia (ppm) - Batas Peringatan:</label>
+            <input
+              type="number"
+              id="ammoniaWarning"
+              min={0}
+              step="0.1"
+              value={configForm.ammoniaWarningMax}
+              onChange={handleConfigInputChange('ammoniaWarningMax')}
+            />
+
             <button id="saveConfigBtn" type="submit" disabled={isSavingConfig}>
               {isSavingConfig ? 'Menyimpan...' : 'Simpan Konfigurasi'}
             </button>
@@ -474,8 +528,12 @@ function convertHistoryToCsv(
           `"${entryLabel}"`,
           `"${new Date(entry.timestamp).toLocaleString()}"`,
           `"${Number.isFinite(amonia.ppm) ? `${amonia.ppm} ppm` : 'Data tidak ada'}"`,
-          `"${Number.isFinite(amonia.score) ? `${amonia.score}/5` : 'Data tidak ada'}"`,
-          `"${water.status || 'Data tidak ada'}"`,
+          `"${Number.isFinite(amonia.score) ? `${amonia.score}/3` : 'Data tidak ada'}"`,
+          `"${
+            typeof water.digital === 'number' && water.digital !== -1
+              ? `${water.status || 'Data tidak ada'} (${water.digital})`
+              : water.status || 'Data tidak ada'
+          }"`,
           `"${soapLabel}"`,
           `"${tissueLabel}"`
         ].join(',')

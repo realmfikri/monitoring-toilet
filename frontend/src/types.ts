@@ -1,7 +1,15 @@
+export interface AmmoniaLimitsConfig {
+  goodMax: number;
+  warningMax: number;
+}
+
 export interface Config {
   historicalIntervalMinutes: number;
   maxReminders: number;
   reminderIntervalMinutes: number;
+  soapEmptyThresholdCm: number;
+  tissueEmptyValue: number;
+  ammoniaLimits: AmmoniaLimitsConfig;
 }
 
 export type EspStatus = 'active' | 'inactive';
@@ -19,29 +27,35 @@ export interface LatestDeviceSnapshot {
 }
 
 export interface AmmoniaSensorData {
-  ppm: number;
-  score: number;
+  ppm: number | null;
+  score: number | null;
   status: string;
 }
 
 export interface WaterSensorData {
+  digital: number;
   status: string;
 }
 
-export interface SensorStatusSlot {
-  distance?: number;
+export interface SoapSensorSlot {
+  distance: number;
   status: string;
 }
 
 export interface SoapSensorData {
-  sabun1: SensorStatusSlot;
-  sabun2: SensorStatusSlot;
-  sabun3: SensorStatusSlot;
+  sabun1: SoapSensorSlot;
+  sabun2: SoapSensorSlot;
+  sabun3: SoapSensorSlot;
 }
 
 export interface TissueSensorData {
-  tisu1: SensorStatusSlot;
-  tisu2: SensorStatusSlot;
+  tisu1: TissueSensorSlot;
+  tisu2: TissueSensorSlot;
+}
+
+export interface TissueSensorSlot {
+  digital: number;
+  status: string;
 }
 
 export type LatestDataMap = Record<string, LatestDeviceSnapshot>;
