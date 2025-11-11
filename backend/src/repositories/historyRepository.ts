@@ -6,6 +6,7 @@ const defaultString = (value: string | null): string => value ?? '';
 
 const mapRowToSnapshot = (row: {
   deviceId: string;
+  displayName: string | null;
   amonia: string | null;
   air: string | null;
   sabun: string | null;
@@ -15,6 +16,7 @@ const mapRowToSnapshot = (row: {
   lastActive: Date;
 }): SnapshotRecord => ({
   deviceId: row.deviceId,
+  displayName: row.displayName,
   amonia: defaultString(row.amonia),
   air: defaultString(row.air),
   sabun: defaultString(row.sabun),
@@ -31,6 +33,7 @@ export class HistoryRepository {
     await this.prisma.deviceHistory.create({
       data: {
         deviceId: snapshot.deviceId,
+        displayName: snapshot.displayName,
         amonia: snapshot.amonia,
         air: snapshot.air,
         sabun: snapshot.sabun,
@@ -48,6 +51,7 @@ export class HistoryRepository {
       orderBy: { timestamp: 'asc' }
     })) as Array<{
       deviceId: string;
+      displayName: string | null;
       amonia: string | null;
       air: string | null;
       sabun: string | null;
@@ -64,6 +68,7 @@ export class HistoryRepository {
       orderBy: [{ deviceId: 'asc' }, { timestamp: 'asc' }]
     })) as Array<{
       deviceId: string;
+      displayName: string | null;
       amonia: string | null;
       air: string | null;
       sabun: string | null;

@@ -11,6 +11,7 @@ export class LatestSnapshotRepository {
     await this.prisma.deviceLatestSnapshot.upsert({
       where: { deviceId: snapshot.deviceId },
       update: {
+        displayName: snapshot.displayName,
         amonia: snapshot.amonia,
         air: snapshot.air,
         sabun: snapshot.sabun,
@@ -21,6 +22,7 @@ export class LatestSnapshotRepository {
       },
       create: {
         deviceId: snapshot.deviceId,
+        displayName: snapshot.displayName,
         amonia: snapshot.amonia,
         air: snapshot.air,
         sabun: snapshot.sabun,
@@ -43,6 +45,7 @@ export class LatestSnapshotRepository {
     const rows = await this.prisma.deviceLatestSnapshot.findMany();
     const typedRows = rows as Array<{
       deviceId: string;
+      displayName: string | null;
       amonia: string | null;
       air: string | null;
       sabun: string | null;
@@ -54,6 +57,7 @@ export class LatestSnapshotRepository {
 
     return typedRows.map(row => ({
       deviceId: row.deviceId,
+      displayName: row.displayName,
       amonia: defaultString(row.amonia),
       air: defaultString(row.air),
       sabun: defaultString(row.sabun),

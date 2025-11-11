@@ -221,6 +221,8 @@ export default function App() {
     return labels[user.role] ?? user.role;
   }, [user]);
 
+  const isSupervisor = user?.role === 'SUPERVISOR';
+
   const globalStatus = useMemo(() => {
     const devices = Object.values(latestData);
     const totalDevices = devices.length;
@@ -234,10 +236,30 @@ export default function App() {
     };
   }, [latestData]);
 
+  const resolveDisplayName = useCallback(
+    (deviceId: string): string | null => {
+      const latestName = normalizeDisplayName(latestData[deviceId]?.displayName);
+      if (latestName) {
+        return latestName;
+      }
+      const historyEntries = historyData[deviceId];
+      if (historyEntries) {
+        for (let index = historyEntries.length - 1; index >= 0; index -= 1) {
+          const candidate = normalizeDisplayName(historyEntries[index]?.displayName);
+          if (candidate) {
+            return candidate;
+          }
+        }
+      }
+      return null;
+    },
+    [latestData, historyData]
+  );
+
   const handleDownloadHistory = useCallback(
     (deviceId: string) => {
       const deviceHistory = historyData[deviceId] ?? [];
-      const csvRows = convertHistoryToCsv(deviceId, deviceHistory);
+      const csvRows = convertHistoryToCsv(deviceId, deviceHistory, resolveDisplayName(deviceId));
       const blob = new Blob([csvRows], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -248,7 +270,65 @@ export default function App() {
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
     },
-    [historyData]
+    [historyData, resolveDisplayName]
+  );
+
+  const handleRenameDevice = useCallback(
+    async (deviceId: string, newDisplayName: string | null) => {
+      if (!token) {
+        setSessionMessage('Sesi login tidak valid. Silakan login ulang.');
+        handleLogout();
+        throw new Error('Sesi login tidak valid.');
+      }
+
+      try {
+        const response = await fetch(buildApiUrl(`/api/device/${encodeURIComponent(deviceId)}/rename`), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({ displayName: newDisplayName })
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          handleUnauthorized();
+          throw new Error('Sesi berakhir. Silakan login ulang.');
+        }
+
+        if (response.status === 404) {
+          throw new Error('Perangkat tidak ditemukan.');
+        }
+
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+
+        setLatestData(prev => {
+          const next = { ...prev };
+          if (next[deviceId]) {
+            next[deviceId] = { ...next[deviceId], displayName: newDisplayName };
+          }
+          return next;
+        });
+
+        setHistoryData(prev => {
+          const next = { ...prev };
+          const entries = next[deviceId];
+          if (entries) {
+            next[deviceId] = entries.map(entry => ({ ...entry, displayName: newDisplayName }));
+          }
+          return next;
+        });
+      } catch (error) {
+        console.error('Error updating device name:', error);
+        if (error instanceof Error) {
+          throw error;
+        }
+        throw new Error('Gagal memperbarui nama perangkat.');
+      }
+    },
+    [token, handleUnauthorized, handleLogout, setLatestData, setHistoryData, setSessionMessage]
   );
 
   if (!token) {
@@ -337,6 +417,9 @@ export default function App() {
               deviceId={deviceId}
               data={latestData[deviceId]}
               history={historyData[deviceId] ?? []}
+              displayName={resolveDisplayName(deviceId)}
+              canRename={isSupervisor}
+              onRename={isSupervisor ? handleRenameDevice : undefined}
               onDownloadHistory={() => handleDownloadHistory(deviceId)}
             />
           ))
@@ -346,7 +429,11 @@ export default function App() {
   );
 }
 
-function convertHistoryToCsv(deviceId: string, history: HistoryDataMap[string]): string {
+function convertHistoryToCsv(
+  deviceId: string,
+  history: HistoryDataMap[string],
+  displayName?: string | null
+): string {
   const headers = [
     'Perangkat',
     'Waktu',
@@ -357,6 +444,8 @@ function convertHistoryToCsv(deviceId: string, history: HistoryDataMap[string]):
     'Ketersediaan Tisu (Gabungan)'
   ];
   const rows = [headers.join(',')];
+
+  const defaultLabel = normalizeDisplayName(displayName) ?? deviceId;
 
   history.forEach(entry => {
     try {
@@ -378,9 +467,11 @@ function convertHistoryToCsv(deviceId: string, history: HistoryDataMap[string]):
       const tissueCritical = tissueStatuses.includes('Habis');
       const tissueLabel = allTissueMissing ? 'Data tidak ada' : tissueCritical ? 'Habis' : 'Tersedia';
 
+      const entryLabel = normalizeDisplayName(entry.displayName) ?? defaultLabel;
+
       rows.push(
         [
-          `"${deviceId}"`,
+          `"${entryLabel}"`,
           `"${new Date(entry.timestamp).toLocaleString()}"`,
           `"${Number.isFinite(amonia.ppm) ? `${amonia.ppm} ppm` : 'Data tidak ada'}"`,
           `"${Number.isFinite(amonia.score) ? `${amonia.score}/5` : 'Data tidak ada'}"`,
@@ -395,4 +486,12 @@ function convertHistoryToCsv(deviceId: string, history: HistoryDataMap[string]):
   });
 
   return rows.join('\n');
+}
+
+function normalizeDisplayName(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }

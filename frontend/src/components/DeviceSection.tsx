@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import {
   AmmoniaSensorData,
   LatestDeviceSnapshot,
@@ -12,6 +12,9 @@ interface DeviceSectionProps {
   data?: LatestDeviceSnapshot;
   history: LatestDeviceSnapshot[];
   onDownloadHistory: () => void;
+  displayName?: string | null;
+  canRename?: boolean;
+  onRename?: (deviceId: string, newName: string | null) => Promise<void>;
 }
 
 interface AggregatedSoapStatus {
@@ -40,8 +43,17 @@ const DEFAULT_TISSUE: TissueSensorData = {
   tisu2: { status: 'Data tidak ada' }
 };
 
-export default function DeviceSection({ deviceId, data, history, onDownloadHistory }: DeviceSectionProps) {
-  const displayName = deviceId.toUpperCase().replace('-', ' ');
+export default function DeviceSection({
+  deviceId,
+  data,
+  history,
+  onDownloadHistory,
+  displayName: displayNameProp,
+  canRename = false,
+  onRename
+}: DeviceSectionProps) {
+  const formattedDeviceId = formatDeviceDisplayId(deviceId);
+  const effectiveDisplayName = (displayNameProp ?? data?.displayName ?? null) ?? formattedDeviceId;
 
   const realtime = useMemo(() => {
     if (!data) {
@@ -67,11 +79,45 @@ export default function DeviceSection({ deviceId, data, history, onDownloadHisto
 
   const recentHistory = useMemo(() => history.slice(-24).reverse(), [history]);
 
+  const handleRenameClick = useCallback(async () => {
+    if (!canRename || !onRename) {
+      return;
+    }
+    const currentName = displayNameProp ?? data?.displayName ?? '';
+    const input = window.prompt(
+      'Masukkan nama tampilan perangkat (kosongkan untuk menghapus).',
+      currentName ?? ''
+    );
+    if (input === null) {
+      return;
+    }
+    const trimmed = input.trim();
+    const newName = trimmed.length > 0 ? trimmed : null;
+    try {
+      await onRename(deviceId, newName);
+      window.alert('Nama perangkat berhasil diperbarui.');
+    } catch (error) {
+      console.error('Error renaming device:', error);
+      window.alert('Gagal memperbarui nama perangkat. Silakan coba lagi.');
+    }
+  }, [canRename, onRename, deviceId, displayNameProp, data?.displayName]);
+
+  const header = (
+    <div className="device-header">
+      <h2>{effectiveDisplayName}</h2>
+      {canRename && onRename ? (
+        <button type="button" className="renameButton" onClick={handleRenameClick}>
+          Ganti Nama
+        </button>
+      ) : null}
+    </div>
+  );
+
   return (
     <section className="device-section-container" data-device-id={deviceId}>
       {realtime ? (
         <div className="realtime-content">
-          <h2>{displayName}</h2>
+          {header}
           <h3 style={{ color: realtime.espStatusColor }}>Status ESP: {realtime.espStatusText}</h3>
           <div className="top-row">
             <div className="card" style={{ backgroundColor: realtime.amonia.score >= 4 ? '#ffdddd' : '#f8f9fa' }}>
@@ -111,13 +157,13 @@ export default function DeviceSection({ deviceId, data, history, onDownloadHisto
         </div>
       ) : (
         <div className="realtime-content">
-          <h2>{displayName}</h2>
+          {header}
           <p>Data real-time belum tersedia.</p>
         </div>
       )}
 
       <div className="table-container">
-        <h2>Data Historis - {displayName}</h2>
+        <h2>Data Historis - {effectiveDisplayName}</h2>
         <button className="downloadButton" onClick={onDownloadHistory}>
           Unduh Data Lengkap
         </button>
@@ -180,6 +226,10 @@ function interpretSnapshot(snapshot: LatestDeviceSnapshot) {
     soapSummary: aggregateSoapStatus(soap),
     tissueSummary: aggregateTissueStatus(tissue)
   };
+}
+
+function formatDeviceDisplayId(deviceId: string): string {
+  return deviceId.toUpperCase().replace(/-/g, ' ');
 }
 
 function aggregateSoapStatus(soap: SoapSensorData): AggregatedSoapStatus {
