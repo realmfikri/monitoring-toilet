@@ -1,14 +1,14 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import DeviceSection from './components/DeviceSection';
+import LoginForm from './components/LoginForm';
+import { AuthenticatedUser, useAuth } from './auth/AuthContext';
+import { buildApiUrl } from './api';
 import { Config, HistoryDataMap, LatestDataMap } from './types';
 
 type ConfigMessage = { type: 'success' | 'error'; text: string } | null;
 
-const API_PREFIX = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
-
-const buildUrl = (path: string) => `${API_PREFIX}${path}`;
-
 export default function App() {
+  const { token, user, logout } = useAuth();
   const [config, setConfig] = useState<Config | null>(null);
   const [configForm, setConfigForm] = useState({
     historicalIntervalMinutes: '5',
@@ -19,10 +19,40 @@ export default function App() {
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [latestData, setLatestData] = useState<LatestDataMap>({});
   const [historyData, setHistoryData] = useState<HistoryDataMap>({});
+  const [sessionMessage, setSessionMessage] = useState<string | null>(null);
+
+  const handleLogout = useCallback(() => {
+    setConfig(null);
+    setLatestData({});
+    setHistoryData({});
+    setConfigMessage(null);
+    logout();
+  }, [logout]);
+
+  const handleUnauthorized = useCallback(() => {
+    setSessionMessage('Sesi berakhir. Silakan login ulang.');
+    handleLogout();
+  }, [handleLogout]);
+
+  const handleLogoutClick = useCallback(() => {
+    setSessionMessage('Anda telah keluar dari sistem.');
+    handleLogout();
+  }, [handleLogout]);
 
   const loadConfig = useCallback(async () => {
+    if (!token) {
+      return;
+    }
     try {
-      const response = await fetch(buildUrl('/api/config'));
+      const response = await fetch(buildApiUrl('/api/config'), {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (response.status === 401 || response.status === 403) {
+        handleUnauthorized();
+        return;
+      }
       if (!response.ok) {
         throw new Error(await response.text());
       }
@@ -37,11 +67,22 @@ export default function App() {
       console.error('Error loading configuration:', error);
       setConfigMessage({ type: 'error', text: 'Gagal memuat konfigurasi.' });
     }
-  }, []);
+  }, [token, handleUnauthorized]);
 
   const loadRealtimeData = useCallback(async () => {
+    if (!token) {
+      return;
+    }
     try {
-      const response = await fetch(buildUrl('/api/latest'));
+      const response = await fetch(buildApiUrl('/api/latest'), {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (response.status === 401 || response.status === 403) {
+        handleUnauthorized();
+        return;
+      }
       if (!response.ok) {
         throw new Error(await response.text());
       }
@@ -50,11 +91,22 @@ export default function App() {
     } catch (error) {
       console.error('Error fetching real-time data:', error);
     }
-  }, []);
+  }, [token, handleUnauthorized]);
 
   const loadHistoryData = useCallback(async () => {
+    if (!token) {
+      return;
+    }
     try {
-      const response = await fetch(buildUrl('/api/history'));
+      const response = await fetch(buildApiUrl('/api/history'), {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (response.status === 401 || response.status === 403) {
+        handleUnauthorized();
+        return;
+      }
       if (!response.ok) {
         throw new Error(await response.text());
       }
@@ -63,27 +115,39 @@ export default function App() {
     } catch (error) {
       console.error('Error fetching historical data:', error);
     }
-  }, []);
+  }, [token, handleUnauthorized]);
 
   useEffect(() => {
+    if (!token) {
+      return;
+    }
     loadConfig();
-  }, [loadConfig]);
+  }, [token, loadConfig]);
 
   useEffect(() => {
+    if (!token) {
+      return;
+    }
     loadRealtimeData();
     const intervalId = window.setInterval(loadRealtimeData, 1000);
     return () => window.clearInterval(intervalId);
-  }, [loadRealtimeData]);
+  }, [token, loadRealtimeData]);
 
   useEffect(() => {
-    if (!config) {
+    if (!token || !config) {
       return;
     }
     loadHistoryData();
     const intervalMs = Math.max(config.historicalIntervalMinutes, 1) * 60 * 1000;
     const intervalId = window.setInterval(loadHistoryData, intervalMs);
     return () => window.clearInterval(intervalId);
-  }, [config, loadHistoryData]);
+  }, [token, config, loadHistoryData]);
+
+  useEffect(() => {
+    if (token) {
+      setSessionMessage(null);
+    }
+  }, [token]);
 
   const handleConfigInputChange = (field: keyof typeof configForm) => (event: React.ChangeEvent<HTMLInputElement>) => {
     setConfigForm(prev => ({ ...prev, [field]: event.target.value }));
@@ -93,6 +157,11 @@ export default function App() {
     event.preventDefault();
     setIsSavingConfig(true);
     setConfigMessage(null);
+    if (!token) {
+      setConfigMessage({ type: 'error', text: 'Sesi login tidak valid. Silakan masuk kembali.' });
+      setIsSavingConfig(false);
+      return;
+    }
     try {
       const payload = {
         historicalIntervalMinutes: Number.parseInt(configForm.historicalIntervalMinutes, 10),
@@ -100,11 +169,19 @@ export default function App() {
         maxReminders: Number.parseInt(configForm.maxReminders, 10)
       };
 
-      const response = await fetch(buildUrl('/api/config'), {
+      const response = await fetch(buildApiUrl('/api/config'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
         body: JSON.stringify(payload)
       });
+
+      if (response.status === 401 || response.status === 403) {
+        handleUnauthorized();
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(await response.text());
@@ -132,6 +209,17 @@ export default function App() {
     Object.keys(historyData).forEach(id => ids.add(id));
     return Array.from(ids).sort();
   }, [latestData, historyData]);
+
+  const userRoleLabel = useMemo(() => {
+    if (!user) {
+      return '';
+    }
+    const labels: Record<AuthenticatedUser['role'], string> = {
+      SUPERVISOR: 'Supervisor',
+      OPERATOR: 'Operator'
+    };
+    return labels[user.role] ?? user.role;
+  }, [user]);
 
   const globalStatus = useMemo(() => {
     const devices = Object.values(latestData);
@@ -163,9 +251,31 @@ export default function App() {
     [historyData]
   );
 
+  if (!token) {
+    return (
+      <div className="app-container">
+        <h1>TOILET MONITORING SYSTEM</h1>
+        {sessionMessage && <p className="session-message">{sessionMessage}</p>}
+        <LoginForm />
+      </div>
+    );
+  }
+
   return (
     <div className="app-container">
       <h1>TOILET MONITORING SYSTEM</h1>
+
+      <div className="auth-banner">
+        <div className="auth-details">
+          <span>
+            Masuk sebagai <strong>{user?.email ?? 'Pengguna'}</strong>
+            {user ? ` • ${userRoleLabel}` : ''}
+          </span>
+        </div>
+        <button type="button" onClick={handleLogoutClick} className="logout-button">
+          Keluar
+        </button>
+      </div>
 
       <div id="header-controls">
         <div className="control-card">

@@ -1,12 +1,18 @@
 import { randomUUID } from 'node:crypto';
+import bcrypt from 'bcrypt';
 import cors from 'cors';
 import type { CorsOptions } from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
+import jwt from 'jsonwebtoken';
+import type { JwtPayload, Secret, SignOptions } from 'jsonwebtoken';
+import type { StringValue } from 'ms';
 import TelegramBot from 'node-telegram-bot-api';
 import pinoHttp from 'pino-http';
 import type { Logger } from 'pino';
 import { z } from 'zod';
+
+import type { UserRole } from '@prisma/client';
 
 import { appConfig, getConfiguredApiKeys, isAllowedOrigin, isValidApiKey } from './config';
 import { prisma } from './database/prismaClient';
@@ -17,11 +23,18 @@ import { LatestSnapshotRepository } from './repositories/latestSnapshotRepositor
 import { TelegramSubscriberRepository } from './repositories/telegramSubscriberRepository';
 import type { SnapshotRecord } from './repositories/types';
 
+interface AuthenticatedUser {
+  id: string;
+  email: string;
+  role: UserRole;
+}
+
 declare global {
   namespace Express {
     interface Request {
       clientIp?: string;
       requestId: string;
+      user?: AuthenticatedUser;
     }
   }
 }
@@ -132,6 +145,8 @@ const deviceStatuses: Record<string, DeviceStatus> = {};
 const app = express();
 
 const configuredApiKeys = getConfiguredApiKeys();
+const authSecret: Secret = appConfig.auth.secret;
+const authTokenExpiration = appConfig.auth.tokenExpiration;
 if (configuredApiKeys.length === 0) {
   appLogger.warn('No API keys configured. The /data endpoint will reject all submissions.');
 } else {
@@ -257,6 +272,91 @@ const configUpdateSchema = z.object({
   reminderIntervalMinutes: z.coerce.number().int().min(1, 'reminderIntervalMinutes must be an integer >= 1.')
 });
 
+const loginSchema = z.object({
+  email: z
+    .string({ required_error: 'Email is required.' })
+    .min(1, 'Email is required.')
+    .trim()
+    .email('Email must be valid.')
+    .transform(value => value.toLowerCase()),
+  password: z.string({ required_error: 'Password is required.' }).min(1, 'Password is required.')
+});
+
+async function verifyUserCredentials(email: string, password: string): Promise<AuthenticatedUser | null> {
+  const normalizedEmail = email.trim().toLowerCase();
+  const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+  if (!user) {
+    return null;
+  }
+
+  const passwordMatches = await bcrypt.compare(password, user.passwordHash);
+  if (!passwordMatches) {
+    return null;
+  }
+
+  return {
+    id: user.id,
+    email: user.email,
+    role: user.role
+  };
+}
+
+const authenticateRequest: express.RequestHandler = (req, res, next) => {
+  const authorizationHeader = req.headers.authorization;
+  if (!authorizationHeader || !authorizationHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Authentication required.' });
+    return;
+  }
+
+  const token = authorizationHeader.slice('Bearer '.length).trim();
+
+  (async () => {
+    try {
+      const decoded = jwt.verify(token, authSecret) as JwtPayload;
+      const userId = decoded.sub;
+
+      if (!userId) {
+        res.status(401).json({ error: 'Invalid authentication token.' });
+        return;
+      }
+
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) {
+        res.status(401).json({ error: 'Invalid authentication token.' });
+        return;
+      }
+
+      req.user = {
+        id: user.id,
+        email: user.email,
+        role: user.role
+      };
+
+      next();
+    } catch (error) {
+      req.log.warn({ err: error }, 'Failed to authenticate request');
+      res.status(401).json({ error: 'Authentication failed.' });
+    }
+  })().catch(error => {
+    req.log.error({ err: error }, 'Unexpected authentication error');
+    res.status(500).json({ error: 'Internal server error.' });
+  });
+};
+
+const requireSupervisor: express.RequestHandler = (req, res, next) => {
+  if (!req.user) {
+    res.status(401).json({ error: 'Authentication required.' });
+    return;
+  }
+
+  if (req.user.role !== 'SUPERVISOR') {
+    res.status(403).json({ error: 'Supervisor privileges required.' });
+    return;
+  }
+
+  next();
+};
+
 const requireApiKey: express.RequestHandler = (req, res, next) => {
   const apiKey = req.get('x-api-key');
   if (!isValidApiKey(apiKey)) {
@@ -380,7 +480,43 @@ app.get('/readyz', (_req: Request, res: Response) => {
   });
 });
 
-app.get('/api/config', (_req: Request, res: Response) => {
+app.post('/api/login', async (req: Request, res: Response) => {
+  const parseResult = loginSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    res.status(400).json({ error: 'Invalid login payload.', details: parseResult.error.flatten() });
+    return;
+  }
+
+  const { email, password } = parseResult.data;
+
+  try {
+    const user = await verifyUserCredentials(email, password);
+    if (!user) {
+      res.status(401).json({ error: 'Email atau password salah.' });
+      return;
+    }
+
+    const signOptions: SignOptions = {
+      expiresIn: authTokenExpiration as StringValue | number,
+      subject: user.id
+    };
+
+    const token = jwt.sign({ email: user.email, role: user.role }, authSecret, signOptions);
+
+    res.status(200).json({
+      token,
+      user: {
+        email: user.email,
+        role: user.role
+      }
+    });
+  } catch (error) {
+    req.log.error({ err: error, email }, 'Failed to authenticate user');
+    res.status(500).json({ error: 'Gagal memproses login. Silakan coba lagi.' });
+  }
+});
+
+app.get('/api/config', authenticateRequest, (_req: Request, res: Response) => {
   res.json({
     historicalIntervalMinutes: config.historicalIntervalMinutes,
     maxReminders: config.maxReminders,
@@ -388,7 +524,7 @@ app.get('/api/config', (_req: Request, res: Response) => {
   });
 });
 
-app.post('/api/config', async (req: Request, res: Response) => {
+app.post('/api/config', authenticateRequest, requireSupervisor, async (req: Request, res: Response) => {
   const parseResult = configUpdateSchema.safeParse(req.body);
   if (!parseResult.success) {
     res.status(400).json({ error: 'Invalid configuration payload.', details: parseResult.error.flatten() });
@@ -530,7 +666,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
   res.status(200).send(`Data from ${deviceID} received successfully.`);
 });
 
-app.get('/api/latest', async (_req: Request, res: Response) => {
+app.get('/api/latest', authenticateRequest, async (_req: Request, res: Response) => {
   const now = Date.now();
   const updates: Promise<void>[] = [];
 
@@ -548,7 +684,7 @@ app.get('/api/latest', async (_req: Request, res: Response) => {
   res.json(latestData);
 });
 
-app.get('/api/history', async (req: Request, res: Response) => {
+app.get('/api/history', authenticateRequest, async (req: Request, res: Response) => {
   try {
     const groupedHistory = await historyRepository.findAllGrouped();
     const allHistory: Record<string, LatestDeviceSnapshot[]> = {};

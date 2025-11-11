@@ -73,6 +73,13 @@ const rateLimitMax = parsePositiveInt(
 const apiKeys = new Set(apiKeysList);
 const allowedOrigins = new Set(allowedOriginsList);
 
+const authSecret = process.env.AUTH_SECRET || (normalizedEnv === 'production' ? undefined : 'development-secret');
+if (!authSecret) {
+  throw new Error('AUTH_SECRET must be set in production environments.');
+}
+
+const tokenExpiration = process.env.AUTH_TOKEN_EXPIRATION || '12h';
+
 export interface AppConfig {
   environment: Environment;
   allowedOrigins: readonly string[];
@@ -83,6 +90,10 @@ export interface AppConfig {
   requireCloudflareAuth: boolean;
   allowRequestsWithoutOrigin: boolean;
   trustProxy: boolean;
+  auth: {
+    secret: string;
+    tokenExpiration: string;
+  };
 }
 
 export const appConfig: AppConfig = {
@@ -94,7 +105,11 @@ export const appConfig: AppConfig = {
   },
   requireCloudflareAuth: normalizedEnv === 'production' ? process.env.REQUIRE_CLOUDFLARE_AUTH !== 'false' : process.env.REQUIRE_CLOUDFLARE_AUTH === 'true',
   allowRequestsWithoutOrigin: normalizedEnv !== 'production',
-  trustProxy: true
+  trustProxy: true,
+  auth: {
+    secret: authSecret,
+    tokenExpiration
+  }
 };
 
 export function isAllowedOrigin(origin: string): boolean {

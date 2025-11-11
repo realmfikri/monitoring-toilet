@@ -12,6 +12,11 @@ enum EspStatus {
   inactive
 }
 
+enum UserRole {
+  SUPERVISOR
+  OPERATOR
+}
+
 model DeviceLatestSnapshot {
   deviceId   String       @id
   amonia     String?
@@ -55,4 +60,13 @@ model ConfigOverride {
   value     Json
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String
+  role         UserRole
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
