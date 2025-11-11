@@ -31,16 +31,16 @@ interface AggregatedTissueStatus {
   details: string[];
 }
 
-const DEFAULT_AMMONIA: AmmoniaSensorData = { ppm: Number.NaN, score: Number.NaN, status: 'Data tidak ada' };
-const DEFAULT_WATER: WaterSensorData = { status: 'Data tidak ada' };
+const DEFAULT_AMMONIA: AmmoniaSensorData = { ppm: null, score: null, status: 'Data tidak ada' };
+const DEFAULT_WATER: WaterSensorData = { digital: -1, status: 'Data tidak ada' };
 const DEFAULT_SOAP: SoapSensorData = {
   sabun1: { distance: -1, status: 'Data tidak ada' },
   sabun2: { distance: -1, status: 'Data tidak ada' },
   sabun3: { distance: -1, status: 'Data tidak ada' }
 };
 const DEFAULT_TISSUE: TissueSensorData = {
-  tisu1: { status: 'Data tidak ada' },
-  tisu2: { status: 'Data tidak ada' }
+  tisu1: { digital: -1, status: 'Data tidak ada' },
+  tisu2: { digital: -1, status: 'Data tidak ada' }
 };
 
 export default function DeviceSection({
@@ -138,6 +138,9 @@ export default function DeviceSection({
             >
               <h2>Genangan Air</h2>
               <p>
+                <strong>Nilai Digital:</strong> {formatDigital(realtime.water.digital)}
+              </p>
+              <p>
                 <strong>Status:</strong> {realtime.water.status || 'Data tidak ada'}
               </p>
             </div>
@@ -192,7 +195,7 @@ export default function DeviceSection({
                       <td>{new Date(snapshot.timestamp).toLocaleString()}</td>
                       <td>{formatPpm(summary.amonia.ppm)}</td>
                       <td>{formatScore(summary.amonia.score)}</td>
-                      <td>{summary.water.status || 'Data tidak ada'}</td>
+                      <td>{formatWaterStatus(summary.water)}</td>
                       <td>{summary.soapSummary.historyLabel}</td>
                       <td>{summary.tissueSummary.historyLabel}</td>
                     </tr>
@@ -251,13 +254,14 @@ function aggregateSoapStatus(soap: SoapSensorData): AggregatedSoapStatus {
 }
 
 function aggregateTissueStatus(tissue: TissueSensorData): AggregatedTissueStatus {
-  const statuses = [tissue.tisu1.status, tissue.tisu2.status].map(getSafeStatus);
+  const slots = [tissue.tisu1, tissue.tisu2];
+  const statuses = slots.map(slot => getSafeStatus(slot.status));
   const unavailable = statuses.every(status => status === 'Data tidak ada');
   const critical = statuses.includes('Habis');
 
   const cardLabel = unavailable ? 'Data tidak ada' : critical ? 'Habis!' : 'Tersedia';
   const historyLabel = unavailable ? 'Data tidak ada' : critical ? 'Habis' : 'Tersedia';
-  const details = [`T1: ${statuses[0]}`, `T2: ${statuses[1]}`];
+  const details = slots.map((slot, index) => `T${index + 1}: ${statuses[index]} (${formatDigital(slot.digital)})`);
 
   return { cardLabel, historyLabel, critical, details };
 }
@@ -288,6 +292,13 @@ function formatDistance(distance: number | undefined): string {
   return 'Data tidak ada';
 }
 
+function formatDigital(value: number | undefined): string {
+  if (typeof value === 'number' && Number.isFinite(value) && value !== -1) {
+    return String(value);
+  }
+  return 'Data tidak ada';
+}
+
 function formatPpm(ppm: number | undefined): string {
   if (typeof ppm === 'number' && Number.isFinite(ppm)) {
     return `${ppm} ppm`;
@@ -297,7 +308,13 @@ function formatPpm(ppm: number | undefined): string {
 
 function formatScore(score: number | undefined): string {
   if (typeof score === 'number' && Number.isFinite(score)) {
-    return `${score}/5`;
+    return `${score}/3`;
   }
   return 'Data tidak ada';
+}
+
+function formatWaterStatus(water: WaterSensorData): string {
+  const statusText = water.status || 'Data tidak ada';
+  const digitalText = formatDigital(water.digital);
+  return digitalText === 'Data tidak ada' ? statusText : `${statusText} (${digitalText})`;
 }

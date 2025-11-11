@@ -16,6 +16,12 @@ export interface ConfigOverrideRecord {
   historicalIntervalMinutes: number;
   maxReminders: number;
   reminderIntervalMinutes: number;
+  soapEmptyThresholdCm: number;
+  tissueEmptyValue: number;
+  ammoniaLimits: {
+    goodMax: number;
+    warningMax: number;
+  };
 }
 
 export interface SubscriberRecord {

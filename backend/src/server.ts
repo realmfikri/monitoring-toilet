@@ -44,7 +44,18 @@ type EspStatus = 'active' | 'inactive';
 type SoapStatus = 'safe' | 'pending' | 'critical';
 type AlertType = 'accident_new' | 'accident_repeat' | 'recovery' | 'routine';
 
-interface ConfigBase {
+interface AmmoniaLimitsConfig {
+  goodMax: number;
+  warningMax: number;
+}
+
+interface ThresholdConfig {
+  soapEmptyThresholdCm: number;
+  tissueEmptyValue: number;
+  ammoniaLimits: AmmoniaLimitsConfig;
+}
+
+interface ConfigBase extends ThresholdConfig {
   historicalIntervalMinutes: number;
   maxReminders: number;
   reminderIntervalMinutes: number;
@@ -92,12 +103,13 @@ interface DeviceStatus {
 }
 
 interface AmmoniaSensorData {
-  ppm: number;
-  score: number;
+  ppm: number | null;
+  score: number | null;
   status: string;
 }
 
 interface WaterSensorData {
+  digital: number;
   status: string;
 }
 
@@ -113,12 +125,55 @@ interface SoapSensorData {
 }
 
 interface TissueSlot {
+  digital: number;
   status: string;
 }
 
 interface TissueSensorData {
   tisu1: TissueSlot;
   tisu2: TissueSlot;
+}
+
+interface RawAmmoniaPayload {
+  ppm: number | null;
+}
+
+interface RawWaterPayload {
+  digital: number | null;
+}
+
+interface RawSoapSlotPayload {
+  distance: number | null;
+}
+
+interface RawSoapPayload {
+  sabun1: RawSoapSlotPayload;
+  sabun2: RawSoapSlotPayload;
+  sabun3: RawSoapSlotPayload;
+}
+
+interface RawTissueSlotPayload {
+  digital: number | null;
+}
+
+interface RawTissuePayload {
+  tisu1: RawTissueSlotPayload;
+  tisu2: RawTissueSlotPayload;
+}
+
+interface NormalizedSensorPayload {
+  deviceID: string;
+  amonia: RawAmmoniaPayload;
+  air: RawWaterPayload;
+  sabun: RawSoapPayload;
+  tisu: RawTissuePayload;
+}
+
+interface ComputedSensorSnapshot {
+  amonia: AmmoniaSensorData;
+  air: WaterSensorData;
+  sabun: SoapSensorData;
+  tisu: TissueSensorData;
 }
 
 const SOAP_DEBOUNCE_MS = 5000;
@@ -132,7 +187,13 @@ const configRepository = new ConfigOverrideRepository(prisma);
 const DEFAULT_CONFIG_BASE: ConfigBase = {
   historicalIntervalMinutes: 5,
   maxReminders: 3,
-  reminderIntervalMinutes: 10
+  reminderIntervalMinutes: 10,
+  soapEmptyThresholdCm: 10,
+  tissueEmptyValue: 0,
+  ammoniaLimits: {
+    goodMax: 1.5,
+    warningMax: 3
+  }
 };
 
 const DEFAULT_CONFIG = deriveConfig(DEFAULT_CONFIG_BASE);
@@ -268,10 +329,29 @@ const requestRateLimiter = rateLimit({
 app.use(requestRateLimiter);
 app.use(express.json({ limit: '1mb' }));
 
+const ammoniaLimitsSchema = z
+  .object({
+    goodMax: z.coerce.number().min(0, 'ammoniaLimits.goodMax must be a number >= 0.'),
+    warningMax: z.coerce.number().min(0, 'ammoniaLimits.warningMax must be a number >= 0.')
+  })
+  .refine(data => data.warningMax > data.goodMax, {
+    message: 'ammoniaLimits.warningMax must be greater than ammoniaLimits.goodMax.',
+    path: ['warningMax']
+  });
+
 const configUpdateSchema = z.object({
   historicalIntervalMinutes: z.coerce.number().int().min(1, 'historicalIntervalMinutes must be an integer >= 1.'),
   maxReminders: z.coerce.number().int().min(0, 'maxReminders must be an integer >= 0.'),
-  reminderIntervalMinutes: z.coerce.number().int().min(1, 'reminderIntervalMinutes must be an integer >= 1.')
+  reminderIntervalMinutes: z.coerce.number().int().min(1, 'reminderIntervalMinutes must be an integer >= 1.'),
+  soapEmptyThresholdCm: z.coerce
+    .number()
+    .min(0, 'soapEmptyThresholdCm must be a number >= 0.'),
+  tissueEmptyValue: z.coerce
+    .number()
+    .int()
+    .min(0, 'tissueEmptyValue must be 0 or 1.')
+    .max(1, 'tissueEmptyValue must be 0 or 1.'),
+  ammoniaLimits: ammoniaLimitsSchema
 });
 
 const loginSchema = z.object({
@@ -457,7 +537,7 @@ if (telegramBot) {
       }
 
       const amonia = parseJson<AmmoniaSensorData>(data.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' }, telegramLogger);
-      const water = parseJson<WaterSensorData>(data.air, { status: 'Data tidak ada' }, telegramLogger);
+      const water = parseJson<WaterSensorData>(data.air, { digital: -1, status: 'Data tidak ada' }, telegramLogger);
       const soap = parseJson<SoapSensorData>(data.sabun, defaultSoapData(), telegramLogger);
       const tissue = parseJson<TissueSensorData>(data.tisu, defaultTissueData(), telegramLogger);
       const timestamp = new Date(data.timestamp).toLocaleString();
@@ -540,7 +620,10 @@ app.get('/api/config', authenticateRequest, (_req: Request, res: Response) => {
   res.json({
     historicalIntervalMinutes: config.historicalIntervalMinutes,
     maxReminders: config.maxReminders,
-    reminderIntervalMinutes: config.reminderIntervalMinutes
+    reminderIntervalMinutes: config.reminderIntervalMinutes,
+    soapEmptyThresholdCm: config.soapEmptyThresholdCm,
+    tissueEmptyValue: config.tissueEmptyValue,
+    ammoniaLimits: config.ammoniaLimits
   });
 });
 
@@ -551,11 +634,21 @@ app.post('/api/config', authenticateRequest, requireSupervisor, async (req: Requ
     return;
   }
 
-  const { historicalIntervalMinutes, maxReminders, reminderIntervalMinutes } = parseResult.data;
+  const {
+    historicalIntervalMinutes,
+    maxReminders,
+    reminderIntervalMinutes,
+    soapEmptyThresholdCm,
+    tissueEmptyValue,
+    ammoniaLimits
+  } = parseResult.data;
   const baseConfig: ConfigBase = {
     historicalIntervalMinutes,
     maxReminders,
-    reminderIntervalMinutes
+    reminderIntervalMinutes,
+    soapEmptyThresholdCm,
+    tissueEmptyValue,
+    ammoniaLimits
   };
 
   try {
@@ -581,10 +674,16 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
   const now = Date.now();
   const normalized = normalizeSensorPayload(payload, req.log);
+  const computedSnapshot = computeSensorSnapshot(normalized, config);
+  const serializedSnapshot = serializeComputedSnapshot(computedSnapshot);
   const existingDisplayName = latestData[deviceID]?.displayName ?? null;
 
   latestData[deviceID] = {
-    ...normalized,
+    deviceID,
+    amonia: serializedSnapshot.amonia,
+    air: serializedSnapshot.air,
+    sabun: serializedSnapshot.sabun,
+    tisu: serializedSnapshot.tisu,
     displayName: existingDisplayName,
     timestamp: new Date().toISOString(),
     espStatus: 'active',
@@ -612,12 +711,10 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
     req.log.error({ err: error, deviceId: deviceID }, '[Latest Snapshot] Failed to persist data');
   }
 
-  const amonia = parseJson<AmmoniaSensorData>(normalized.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' }, req.log);
-  const soap = parseJson<SoapSensorData>(normalized.sabun, defaultSoapData(), req.log);
-  const tissue = normalized.tisu;
+  const soap = computedSnapshot.sabun;
+  const tissue = computedSnapshot.tisu;
 
-  const isAnySoapCritical =
-    soap.sabun1.status === 'Habis' || soap.sabun2.status === 'Habis' || soap.sabun3.status === 'Habis';
+  const isAnySoapCritical = isSoapCritical(soap);
 
   if (isAnySoapCritical) {
     if (status.soapStatusConfirmed === 'safe') {
@@ -631,7 +728,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
     status.soapPendingStartTime = 0;
   }
 
-  const activeAlerts = getActiveAlerts(deviceID, status.soapStatusConfirmed, tissue, req.log);
+  const activeAlerts = getActiveAlerts(deviceID, status.soapStatusConfirmed, tissue);
   const isAlerting = activeAlerts.length > 0;
 
   if (isAlerting) {
@@ -794,32 +891,240 @@ function deriveConfig(input: ConfigBase): Config {
   };
 }
 
-function normalizeSensorPayload(
-  payload: RawSensorPayload,
-  logger: Logger
-): Omit<LatestDeviceSnapshot, 'timestamp' | 'espStatus' | 'lastActive' | 'displayName'> {
+function normalizeSensorPayload(payload: RawSensorPayload, logger: Logger): NormalizedSensorPayload {
   return {
     deviceID: payload.deviceID,
-    amonia: stringifyIfNeeded(payload.amonia, logger),
-    air: stringifyIfNeeded(payload.air, logger),
-    sabun: stringifyIfNeeded(payload.sabun, logger),
-    tisu: stringifyIfNeeded(payload.tisu, logger)
+    amonia: normalizeAmmoniaPayload(payload.amonia, logger),
+    air: normalizeWaterPayload(payload.air, logger),
+    sabun: normalizeSoapPayload(payload.sabun, logger),
+    tisu: normalizeTissuePayload(payload.tisu, logger)
   };
 }
 
-function stringifyIfNeeded(value: unknown, logger: Logger): string {
+function computeSensorSnapshot(payload: NormalizedSensorPayload, config: ConfigBase): ComputedSensorSnapshot {
+  return {
+    amonia: computeAmmoniaStatus(payload.amonia, config.ammoniaLimits),
+    air: computeWaterStatus(payload.air),
+    sabun: computeSoapStatus(payload.sabun, config.soapEmptyThresholdCm),
+    tisu: computeTissueStatus(payload.tisu, config.tissueEmptyValue)
+  };
+}
+
+function serializeComputedSnapshot(snapshot: ComputedSensorSnapshot): Pick<LatestDeviceSnapshot, 'amonia' | 'air' | 'sabun' | 'tisu'> {
+  return {
+    amonia: JSON.stringify(snapshot.amonia),
+    air: JSON.stringify(snapshot.air),
+    sabun: JSON.stringify(snapshot.sabun),
+    tisu: JSON.stringify(snapshot.tisu)
+  };
+}
+
+function isSoapCritical(soap: SoapSensorData): boolean {
+  return (
+    soap.sabun1.status === 'Habis' || soap.sabun2.status === 'Habis' || soap.sabun3.status === 'Habis'
+  );
+}
+
+function normalizeAmmoniaPayload(value: unknown, logger: Logger): RawAmmoniaPayload {
+  if (typeof value === 'number') {
+    return { ppm: Number.isFinite(value) ? value : null };
+  }
+
+  const objectValue = parseJsonObject(value, logger);
+  if (!objectValue) {
+    return { ppm: null };
+  }
+
+  const ppm = toFiniteNumber(objectValue.ppm ?? objectValue.value);
+  return { ppm };
+}
+
+function normalizeWaterPayload(value: unknown, logger: Logger): RawWaterPayload {
+  if (typeof value === 'number') {
+    return { digital: normalizeDigitalValue(value) };
+  }
+
+  const objectValue = parseJsonObject(value, logger);
+  if (!objectValue) {
+    return { digital: null };
+  }
+
+  const digital = toFiniteNumber(objectValue.digital ?? objectValue.value);
+  return { digital: digital === null ? null : normalizeDigitalValue(digital) };
+}
+
+function normalizeSoapPayload(value: unknown, logger: Logger): RawSoapPayload {
+  const objectValue = parseJsonObject(value, logger) ?? {};
+
+  return {
+    sabun1: normalizeSoapSlot(objectValue.sabun1, logger),
+    sabun2: normalizeSoapSlot(objectValue.sabun2, logger),
+    sabun3: normalizeSoapSlot(objectValue.sabun3, logger)
+  };
+}
+
+function normalizeSoapSlot(value: unknown, logger: Logger): RawSoapSlotPayload {
+  if (typeof value === 'number') {
+    return { distance: Number.isFinite(value) ? value : null };
+  }
+
   if (typeof value === 'string') {
+    const parsed = Number(value);
+    return { distance: Number.isFinite(parsed) ? parsed : null };
+  }
+
+  const objectValue = parseJsonObject(value, logger);
+  if (!objectValue) {
+    return { distance: null };
+  }
+
+  const distance = toFiniteNumber(objectValue.distance ?? objectValue.distanceCm ?? objectValue.value);
+  return { distance };
+}
+
+function normalizeTissuePayload(value: unknown, logger: Logger): RawTissuePayload {
+  const objectValue = parseJsonObject(value, logger) ?? {};
+
+  return {
+    tisu1: normalizeTissueSlot(objectValue.tisu1, logger),
+    tisu2: normalizeTissueSlot(objectValue.tisu2, logger)
+  };
+}
+
+function normalizeTissueSlot(value: unknown, logger: Logger): RawTissueSlotPayload {
+  if (typeof value === 'number') {
+    return { digital: normalizeDigitalValue(value) };
+  }
+
+  const objectValue = parseJsonObject(value, logger);
+  if (!objectValue) {
+    return { digital: null };
+  }
+
+  const digital = toFiniteNumber(objectValue.digital ?? objectValue.value);
+  return { digital: digital === null ? null : normalizeDigitalValue(digital) };
+}
+
+function computeAmmoniaStatus(payload: RawAmmoniaPayload, limits: AmmoniaLimitsConfig): AmmoniaSensorData {
+  if (payload.ppm === null || !Number.isFinite(payload.ppm)) {
+    return { ppm: null, score: null, status: 'Data tidak ada' };
+  }
+
+  const ppm = Math.max(payload.ppm, 0);
+  let score = 1;
+  let status = 'Bagus';
+
+  if (ppm > limits.goodMax) {
+    score = 2;
+    status = 'Normal';
+  }
+
+  if (ppm > limits.warningMax) {
+    score = 3;
+    status = 'Kritis';
+  }
+
+  return { ppm, score, status };
+}
+
+function computeWaterStatus(payload: RawWaterPayload): WaterSensorData {
+  if (payload.digital === null || !Number.isFinite(payload.digital)) {
+    return { digital: -1, status: 'Data tidak ada' };
+  }
+
+  const digital = payload.digital <= 0 ? 0 : 1;
+  return {
+    digital,
+    status: digital === 0 ? 'Genangan air terdeteksi.' : 'Lantai kering.'
+  };
+}
+
+function computeSoapStatus(payload: RawSoapPayload, thresholdCm: number): SoapSensorData {
+  return {
+    sabun1: computeSoapSlotStatus(payload.sabun1, thresholdCm),
+    sabun2: computeSoapSlotStatus(payload.sabun2, thresholdCm),
+    sabun3: computeSoapSlotStatus(payload.sabun3, thresholdCm)
+  };
+}
+
+function computeSoapSlotStatus(payload: RawSoapSlotPayload, thresholdCm: number): SoapSlot {
+  if (payload.distance === null || !Number.isFinite(payload.distance) || payload.distance < 0) {
+    return { distance: -1, status: 'Data tidak ada' };
+  }
+
+  const distance = Math.round(payload.distance);
+  if (distance < 0) {
+    return { distance: -1, status: 'Data tidak ada' };
+  }
+
+  if (distance > thresholdCm) {
+    return { distance, status: 'Habis' };
+  }
+
+  return { distance, status: 'Aman' };
+}
+
+function computeTissueStatus(payload: RawTissuePayload, emptyValue: number): TissueSensorData {
+  return {
+    tisu1: computeTissueSlotStatus(payload.tisu1, emptyValue),
+    tisu2: computeTissueSlotStatus(payload.tisu2, emptyValue)
+  };
+}
+
+function computeTissueSlotStatus(payload: RawTissueSlotPayload, emptyValue: number): TissueSlot {
+  if (payload.digital === null || !Number.isFinite(payload.digital)) {
+    return { digital: -1, status: 'Data tidak ada' };
+  }
+
+  const digital = payload.digital <= 0 ? 0 : 1;
+  return {
+    digital,
+    status: digital === emptyValue ? 'Habis' : 'Tersedia'
+  };
+}
+
+function parseJsonObject(value: unknown, logger: Logger): Record<string, unknown> | null {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch (error) {
+      logger.warn({ err: error }, 'Failed to parse sensor payload JSON');
+    }
+  }
+
+  return null;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
   }
-  if (value === undefined || value === null) {
-    return '';
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
   }
-  try {
-    return JSON.stringify(value);
-  } catch (error) {
-    logger.error({ err: error }, 'Failed to stringify sensor payload, defaulting to empty object');
-    return '{}';
+  return null;
+}
+
+function normalizeDigitalValue(value: number): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
   }
+  return value <= 0 ? 0 : 1;
 }
 
 function extractFloorFromDeviceID(deviceID: string): number {
@@ -861,19 +1166,13 @@ function toLatestDeviceSnapshot(record: SnapshotRecord): LatestDeviceSnapshot {
   };
 }
 
-function getActiveAlerts(
-  deviceID: string,
-  soapStatusConfirmed: SoapStatus,
-  tissueRaw: string,
-  logger: Logger = appLogger
-): string[] {
+function getActiveAlerts(_deviceID: string, soapStatusConfirmed: SoapStatus, tissue: TissueSensorData): string[] {
   const alerts: string[] = [];
 
   if (soapStatusConfirmed === 'critical') {
     alerts.push('SABUN HAMPIR HABIS');
   }
 
-  const tissue = parseJson<TissueSensorData>(tissueRaw, defaultTissueData(), logger);
   const statusTisu1 = tissue.tisu1.status;
   const statusTisu2 = tissue.tisu2.status;
 
@@ -902,14 +1201,13 @@ function sendTelegramAlert(
   }
 
   const logger = context.logger ?? appLogger;
-  const amonia = parseJson<AmmoniaSensorData>(sensorData.amonia, { ppm: NaN, score: NaN, status: 'Data tidak ada' }, logger);
-  const water = parseJson<WaterSensorData>(sensorData.air, { status: 'Data tidak ada' }, logger);
+  const amonia = parseJson<AmmoniaSensorData>(sensorData.amonia, { ppm: null, score: null, status: 'Data tidak ada' }, logger);
+  const water = parseJson<WaterSensorData>(sensorData.air, { digital: -1, status: 'Data tidak ada' }, logger);
   const soap = parseJson<SoapSensorData>(sensorData.sabun, defaultSoapData(), logger);
   const tissue = parseJson<TissueSensorData>(sensorData.tisu, defaultTissueData(), logger);
   const timestamp = new Date(sensorData.timestamp).toLocaleString();
 
-  const isAnySoapCritical =
-    soap.sabun1.status === 'Habis' || soap.sabun2.status === 'Habis' || soap.sabun3.status === 'Habis';
+  const isAnySoapCritical = isSoapCritical(soap);
   const isAnyTissueCritical = tissue.tisu1.status === 'Habis' || tissue.tisu2.status === 'Habis';
 
   const soapStatusKeseluruhan = isAnySoapCritical ? 'HAMPIR HABIS' : 'Aman';
@@ -945,12 +1243,19 @@ function sendTelegramAlert(
       return;
     }
 
-    const statusDetails = [
-      `Bau: ${amonia.status} (${Number.isFinite(amonia.ppm) ? `${amonia.ppm} ppm` : 'Data tidak ada'})`,
-      `Genangan Air: ${water.status}`,
-      `Sabun: ${soapStatusKeseluruhan}`,
-      `Tisu: ${tissueStatusKeseluruhan}`
-    ].join('\n');
+  const formatSoapDistance = (slot: SoapSlot): string =>
+    typeof slot.distance === 'number' && Number.isFinite(slot.distance) && slot.distance !== -1
+      ? `${slot.distance} cm`
+      : 'N/A';
+
+  const formatDigitalValue = (value: number): string => (value === -1 || !Number.isFinite(value) ? 'N/A' : String(value));
+
+  const statusDetails = [
+    `Bau: ${amonia.status} (${Number.isFinite(amonia.ppm) ? `${amonia.ppm} ppm` : 'Data tidak ada'})`,
+    `Genangan Air: ${water.status} (digital: ${formatDigitalValue(water.digital)})`,
+    `Sabun: ${soapStatusKeseluruhan} (S1: ${soap.sabun1.status}/${formatSoapDistance(soap.sabun1)}, S2: ${soap.sabun2.status}/${formatSoapDistance(soap.sabun2)}, S3: ${soap.sabun3.status}/${formatSoapDistance(soap.sabun3)})`,
+    `Tisu: ${tissueStatusKeseluruhan} (T1: ${tissue.tisu1.status}/${formatDigitalValue(tissue.tisu1.digital)}, T2: ${tissue.tisu2.status}/${formatDigitalValue(tissue.tisu2.digital)})`
+  ].join('\n');
 
     const requestSuffix = context.requestId ? `\nRequest ID: ${context.requestId}` : '';
 
@@ -984,8 +1289,8 @@ function defaultSoapData(): SoapSensorData {
 
 function defaultTissueData(): TissueSensorData {
   return {
-    tisu1: { status: 'Data tidak ada' },
-    tisu2: { status: 'Data tidak ada' }
+    tisu1: { digital: -1, status: 'Data tidak ada' },
+    tisu2: { digital: -1, status: 'Data tidak ada' }
   };
 }
 

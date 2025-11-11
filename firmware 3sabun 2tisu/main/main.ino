@@ -499,20 +499,11 @@ String buildApiEndpoint(const String& baseUrl) {
 
 String getAmoniaDataJson() {
     extern float getAveragedPPM();
-    extern int konversiKeLikert(float ppm);
-    
-    float ppm_NH3 = getAveragedPPM(); 
-    int skor = konversiKeLikert(ppm_NH3);
 
-    String statusBau;
-    if (skor == 1) statusBau = "Bagus";
-    else if (skor == 2) statusBau = "Normal";
-    else statusBau = "Kritis";
+    float ppm_NH3 = getAveragedPPM();
 
-    StaticJsonDocument<200> doc;
-    doc["ppm"] = String(ppm_NH3, 2);
-    doc["score"] = skor;
-    doc["status"] = statusBau;
+    StaticJsonDocument<64> doc;
+    doc["ppm"] = ppm_NH3;
 
     String jsonString;
     serializeJson(doc, jsonString);
@@ -520,15 +511,11 @@ String getAmoniaDataJson() {
 }
 
 String getWaterDataJson() {
-    extern const int waterSensorPin; 
-    String status;
-    if (digitalRead(waterSensorPin) == LOW) {
-        status = "Genangan air terdeteksi.";
-    } else {
-        status = "Lantai kering.";
-    }
-    StaticJsonDocument<100> doc;
-    doc["status"] = status;
+    extern const int waterSensorPin;
+
+    StaticJsonDocument<64> doc;
+    doc["digital"] = digitalRead(waterSensorPin);
+
     String jsonString;
     serializeJson(doc, jsonString);
     return jsonString;
@@ -537,33 +524,26 @@ String getWaterDataJson() {
 String getSoapDataJson() {
     extern const int trigPin1, echoPin1, trigPin2, echoPin2, trigPin3, echoPin3;
     extern long getDistance(int trigPin, int echoPin);
-    
+
     long distance1 = getDistance(trigPin1, echoPin1);
     long distance2 = getDistance(trigPin2, echoPin2);
     long distance3 = getDistance(trigPin3, echoPin3);
-    
-    String status1 = (distance1 <= 1) ? "N/A" : ((distance1 > 10) ? "Habis" : "Aman");
-    String status2 = (distance2 <= 1) ? "N/A" : ((distance2 > 10) ? "Habis" : "Aman");
-    String status3 = (distance3 <= 1) ? "N/A" : ((distance3 > 10) ? "Habis" : "Aman");
 
     long dist1 = (distance1 <= 1) ? -1 : distance1;
     long dist2 = (distance2 <= 1) ? -1 : distance2;
     long dist3 = (distance3 <= 1) ? -1 : distance3;
-    
-    StaticJsonDocument<300> doc;
-    
+
+    StaticJsonDocument<192> doc;
+
     JsonObject sabun1 = doc.createNestedObject("sabun1");
-    sabun1["distance"] = dist1; 
-    sabun1["status"] = status1;
-    
+    sabun1["distance"] = dist1;
+
     JsonObject sabun2 = doc.createNestedObject("sabun2");
     sabun2["distance"] = dist2;
-    sabun2["status"] = status2;
-    
+
     JsonObject sabun3 = doc.createNestedObject("sabun3");
     sabun3["distance"] = dist3;
-    sabun3["status"] = status3;
-    
+
     String jsonString;
     serializeJson(doc, jsonString);
     return jsonString;
@@ -571,20 +551,14 @@ String getSoapDataJson() {
 
 String getTissueDataJson() {
     extern const int tissueSensorPin1, tissueSensorPin2;
-    
-    int read1 = digitalRead(tissueSensorPin1);
-    int read2 = digitalRead(tissueSensorPin2);
-    
-    String status1 = (read1 == LOW) ? "Habis" : "Tersedia";
-    String status2 = (read2 == LOW) ? "Habis" : "Tersedia";
 
-    StaticJsonDocument<200> doc;
-    
+    StaticJsonDocument<128> doc;
+
     JsonObject tisu1 = doc.createNestedObject("tisu1");
-    tisu1["status"] = status1; 
-    
+    tisu1["digital"] = digitalRead(tissueSensorPin1);
+
     JsonObject tisu2 = doc.createNestedObject("tisu2");
-    tisu2["status"] = status2;
+    tisu2["digital"] = digitalRead(tissueSensorPin2);
 
     String jsonString;
     serializeJson(doc, jsonString);
