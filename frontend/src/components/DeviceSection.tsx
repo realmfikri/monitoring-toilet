@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   AmmoniaSensorData,
   LatestDeviceSnapshot,
@@ -58,6 +58,7 @@ export default function DeviceSection({
   hasMoreHistory = false,
   isLoadingHistory = false
 }: DeviceSectionProps) {
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const formattedDeviceId = formatDeviceDisplayId(deviceId);
   const effectiveDisplayName = (displayNameProp ?? data?.displayName ?? null) ?? formattedDeviceId;
 
@@ -107,6 +108,10 @@ export default function DeviceSection({
       window.alert('Gagal memperbarui nama perangkat. Silakan coba lagi.');
     }
   }, [canRename, onRename, deviceId, displayNameProp, data?.displayName]);
+
+  const toggleHistoryDrawer = useCallback(() => {
+    setIsHistoryOpen(prev => !prev);
+  }, []);
 
   const header = (
     <div className="device-header">
@@ -171,63 +176,80 @@ export default function DeviceSection({
         </div>
       )}
 
-      <div className="table-container">
-        <h2>Data Historis - {effectiveDisplayName}</h2>
-        <button className="downloadButton" onClick={onDownloadHistory}>
-          Unduh Data Lengkap
+      <div className="history-toggle-bar">
+        <button
+          type="button"
+          className={`drawer-toggle ${isHistoryOpen ? 'open' : ''}`}
+          onClick={toggleHistoryDrawer}
+        >
+          {isHistoryOpen ? 'Sembunyikan Riwayat' : 'Riwayat & Unduhan'}
         </button>
-        <table className="historyTable">
-          <thead>
-            <tr>
-              <th>Waktu</th>
-              <th>Amonia (ppm)</th>
-              <th>Skor Bau</th>
-              <th>Genangan Air</th>
-              <th>Ketersediaan Sabun (Gabungan)</th>
-              <th>Ketersediaan Tisu (Gabungan)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {historyRows.length === 0 ? (
-              <tr>
-                <td colSpan={6}>Belum ada data historis.</td>
-              </tr>
-            ) : (
-              historyRows.map((snapshot, index) => {
-                try {
-                  const summary = interpretSnapshot(snapshot);
-                  return (
-                    <tr key={`${snapshot.timestamp}-${index}`}>
-                      <td>{new Date(snapshot.timestamp).toLocaleString()}</td>
-                      <td>{formatPpm(summary.amonia.ppm)}</td>
-                      <td>{formatScore(summary.amonia.score)}</td>
-                      <td>{formatWaterStatus(summary.water)}</td>
-                      <td>{summary.soapSummary.historyLabel}</td>
-                      <td>{summary.tissueSummary.historyLabel}</td>
-                    </tr>
-                  );
-                } catch (error) {
-                  console.error('Error parsing historical data row:', error);
-                  return (
-                    <tr key={`${snapshot.timestamp}-${index}`}>
-                      <td colSpan={6}>Data tidak valid atau rusak.</td>
-                    </tr>
-                  );
-                }
-              })
-            )}
-          </tbody>
-        </table>
-        {hasMoreHistory && onLoadMoreHistory ? (
-          <button
-            type="button"
-            className="loadMoreButton"
-            onClick={onLoadMoreHistory}
-            disabled={isLoadingHistory}
-          >
-            {isLoadingHistory ? 'Memuat...' : 'Muat lebih banyak'}
-          </button>
-        ) : null}
+      </div>
+      <div className={`history-drawer ${isHistoryOpen ? 'open' : ''}`}>
+        <div className="history-drawer__panel">
+          <div className="history-drawer__actions">
+            <h2>Data Historis - {effectiveDisplayName}</h2>
+            <button className="downloadButton" onClick={onDownloadHistory}>
+              Unduh Data Lengkap
+            </button>
+          </div>
+          <div className="history-drawer__table table-container">
+            <table className="historyTable">
+              <thead>
+                <tr>
+                  <th>Waktu</th>
+                  <th>Amonia (ppm)</th>
+                  <th>Skor Bau</th>
+                  <th>Genangan Air</th>
+                  <th>Ketersediaan Sabun (Gabungan)</th>
+                  <th>Ketersediaan Tisu (Gabungan)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historyRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={6}>Belum ada data historis.</td>
+                  </tr>
+                ) : (
+                  historyRows.map((snapshot, index) => {
+                    try {
+                      const summary = interpretSnapshot(snapshot);
+                      return (
+                        <tr key={`${snapshot.timestamp}-${index}`}>
+                          <td>{new Date(snapshot.timestamp).toLocaleString()}</td>
+                          <td>{formatPpm(summary.amonia.ppm)}</td>
+                          <td>{formatScore(summary.amonia.score)}</td>
+                          <td>{formatWaterStatus(summary.water)}</td>
+                          <td>{summary.soapSummary.historyLabel}</td>
+                          <td>{summary.tissueSummary.historyLabel}</td>
+                        </tr>
+                      );
+                    } catch (error) {
+                      console.error('Error parsing historical data row:', error);
+                      return (
+                        <tr key={`${snapshot.timestamp}-${index}`}>
+                          <td colSpan={6}>Data tidak valid atau rusak.</td>
+                        </tr>
+                      );
+                    }
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+          {hasMoreHistory && onLoadMoreHistory ? (
+            <div className="history-drawer__footer">
+              <button
+                type="button"
+                className="loadMoreButton"
+                onClick={onLoadMoreHistory}
+                disabled={isLoadingHistory}
+              >
+                {isLoadingHistory ? 'Memuat...' : 'Muat lebih banyak'}
+              </button>
+            </div>
+          ) : null}
+        </div>
       </div>
     </section>
   );
