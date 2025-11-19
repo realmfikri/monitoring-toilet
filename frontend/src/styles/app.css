@@ -270,15 +270,22 @@ h1 {
 }
 
 .realtime-content {
-  text-align: center;
+  text-align: left;
 }
 
 .device-header {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.device-header__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .renameButton {
@@ -304,18 +311,105 @@ h1 {
   justify-content: center;
 }
 
-.card {
-  background-color: #f8f9fa;
-  border-radius: 10px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-  padding: 20px;
-  min-width: 200px;
-  flex: 1 1 220px;
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.85rem;
 }
 
-.card h2 {
-  margin-top: 0;
-  color: #444;
+.status-badge__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-flex;
+}
+
+.status-badge--active {
+  background-color: rgba(25, 135, 84, 0.12);
+  color: #198754;
+  box-shadow: 0 0 12px rgba(25, 135, 84, 0.25);
+}
+
+.status-badge--active .status-badge__dot {
+  background-color: #198754;
+  box-shadow: 0 0 8px rgba(25, 135, 84, 0.7);
+}
+
+.status-badge--inactive {
+  background-color: rgba(220, 53, 69, 0.12);
+  color: #dc3545;
+  box-shadow: 0 0 12px rgba(220, 53, 69, 0.25);
+}
+
+.status-badge--inactive .status-badge__dot {
+  background-color: #dc3545;
+  box-shadow: 0 0 8px rgba(220, 53, 69, 0.7);
+}
+
+.sensor-card {
+  background-color: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  flex: 1 1 220px;
+  min-width: 220px;
+  border-left: 4px solid transparent;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.06);
+}
+
+.sensor-card__title-row h3 {
+  margin: 0 0 12px;
+  color: #1f2937;
+}
+
+.sensor-card__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+
+.sensor-card__stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.sensor-card__value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #0b132b;
+}
+
+.sensor-card__label {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  color: #6c757d;
+}
+
+.sensor-card__details {
+  margin: 16px 0 0;
+  padding-left: 18px;
+  color: #4b5563;
+}
+
+.sensor-card__details li {
+  margin-bottom: 4px;
+}
+
+.severity-normal {
+  border-left-color: #d0d7de;
+}
+
+.severity-warning {
+  border-left-color: #f9c74f;
+  box-shadow: 0 6px 16px rgba(249, 199, 79, 0.3);
+}
+
+.severity-critical {
+  border-left-color: #f94144;
+  box-shadow: 0 6px 16px rgba(249, 65, 68, 0.25);
 }
 
 .table-container {

@@ -34,6 +34,57 @@ interface AggregatedTissueStatus {
   details: string[];
 }
 
+type EspStatus = 'active' | 'inactive';
+
+type SensorSeverity = 'normal' | 'warning' | 'critical';
+
+interface StatusBadgeProps {
+  status: EspStatus;
+  label: string;
+}
+
+interface SensorCardStat {
+  label: string;
+  value: string;
+}
+
+interface SensorCardProps {
+  title: string;
+  stats: SensorCardStat[];
+  severity?: SensorSeverity;
+  details?: string[];
+}
+
+const StatusBadge = ({ status, label }: StatusBadgeProps) => (
+  <div className={`status-badge status-badge--${status}`}>
+    <span className="status-badge__dot" />
+    <span className="status-badge__label">{label}</span>
+  </div>
+);
+
+const SensorCard = ({ title, stats, severity = 'normal', details = [] }: SensorCardProps) => (
+  <div className={`sensor-card severity-${severity}`}>
+    <div className="sensor-card__title-row">
+      <h3>{title}</h3>
+    </div>
+    <div className="sensor-card__stats">
+      {stats.map(stat => (
+        <div className="sensor-card__stat" key={stat.label}>
+          <span className="sensor-card__value">{stat.value}</span>
+          <span className="sensor-card__label">{stat.label.toUpperCase()}</span>
+        </div>
+      ))}
+    </div>
+    {details.length > 0 ? (
+      <ul className="sensor-card__details">
+        {details.map(detail => (
+          <li key={detail}>{detail}</li>
+        ))}
+      </ul>
+    ) : null}
+  </div>
+);
+
 const DEFAULT_AMMONIA: AmmoniaSensorData = { ppm: null, score: null, status: 'Data tidak ada' };
 const DEFAULT_WATER: WaterSensorData = { digital: -1, status: 'Data tidak ada' };
 const DEFAULT_SOAP: SoapSensorData = {
@@ -80,7 +131,7 @@ export default function DeviceSection({
       tissueSummary: aggregateTissueStatus(tissue),
       timestamp: new Date(data.timestamp).toLocaleString(),
       espStatusText: data.espStatus === 'active' ? 'Aktif' : 'Tidak Aktif',
-      espStatusColor: data.espStatus === 'active' ? 'green' : 'red'
+      espStatus: data.espStatus === 'active' ? 'active' : 'inactive'
     };
   }, [data]);
 
@@ -115,11 +166,16 @@ export default function DeviceSection({
 
   const header = (
     <div className="device-header">
-      <h2>{effectiveDisplayName}</h2>
-      {canRename && onRename ? (
-        <button type="button" className="renameButton" onClick={handleRenameClick}>
-          Ganti Nama
-        </button>
+      <div className="device-header__title">
+        <h2>{effectiveDisplayName}</h2>
+        {canRename && onRename ? (
+          <button type="button" className="renameButton" onClick={handleRenameClick}>
+            Ganti Nama
+          </button>
+        ) : null}
+      </div>
+      {realtime ? (
+        <StatusBadge status={realtime.espStatus} label={`ESP ${realtime.espStatusText}`} />
       ) : null}
     </div>
   );
@@ -129,44 +185,34 @@ export default function DeviceSection({
       {realtime ? (
         <div className="realtime-content">
           {header}
-          <h3 style={{ color: realtime.espStatusColor }}>Status ESP: {realtime.espStatusText}</h3>
           <div className="top-row">
-            <div className="card" style={{ backgroundColor: realtime.amonia.score >= 4 ? '#ffdddd' : '#f8f9fa' }}>
-              <h2>Amonia</h2>
-              <p>
-                <strong>NH₃:</strong> {formatPpm(realtime.amonia.ppm)}
-              </p>
-              <p>
-                <strong>Skor Bau:</strong> {formatScore(realtime.amonia.score)}
-              </p>
-              <p>
-                <strong>Interpretasi:</strong> {realtime.amonia.status || 'Data tidak ada'}
-              </p>
-            </div>
-            <div
-              className="card"
-              style={{ backgroundColor: realtime.water.status.toLowerCase().includes('terdeteksi') ? '#ffdddd' : '#f8f9fa' }}
-            >
-              <h2>Genangan Air</h2>
-              <p>
-                <strong>Nilai Digital:</strong> {formatDigital(realtime.water.digital)}
-              </p>
-              <p>
-                <strong>Status:</strong> {realtime.water.status || 'Data tidak ada'}
-              </p>
-            </div>
-            <div className="card" style={{ backgroundColor: realtime.tissueSummary.critical ? '#ffdddd' : '#f8f9fa' }}>
-              <h2>Tisu (Status Gabungan: {realtime.tissueSummary.cardLabel})</h2>
-              {realtime.tissueSummary.details.map(detail => (
-                <p key={detail}>{detail}</p>
-              ))}
-            </div>
-            <div className="card" style={{ backgroundColor: realtime.soapSummary.critical ? '#ffdddd' : '#f8f9fa' }}>
-              <h2>Sabun (Status Gabungan: {realtime.soapSummary.cardLabel})</h2>
-              {realtime.soapSummary.details.map(detail => (
-                <p key={detail}>{detail}</p>
-              ))}
-            </div>
+            <SensorCard
+              title="Amonia"
+              severity={getAmoniaSeverity(realtime.amonia.score)}
+              stats={[
+                { label: 'NH₃', value: formatPpm(realtime.amonia.ppm) },
+                { label: 'Skor Bau', value: formatScore(realtime.amonia.score) }
+              ]}
+              details={[`Interpretasi: ${realtime.amonia.status || 'Data tidak ada'}`]}
+            />
+            <SensorCard
+              title="Genangan Air"
+              severity={realtime.water.status.toLowerCase().includes('terdeteksi') ? 'critical' : 'normal'}
+              stats={[{ label: 'Nilai Digital', value: formatDigital(realtime.water.digital) }]}
+              details={[`Status: ${realtime.water.status || 'Data tidak ada'}`]}
+            />
+            <SensorCard
+              title={`Tisu (${realtime.tissueSummary.cardLabel})`}
+              severity={realtime.tissueSummary.critical ? 'critical' : 'normal'}
+              stats={[{ label: 'Slot', value: realtime.tissueSummary.cardLabel }]}
+              details={realtime.tissueSummary.details}
+            />
+            <SensorCard
+              title={`Sabun (${realtime.soapSummary.cardLabel})`}
+              severity={realtime.soapSummary.critical ? 'critical' : 'normal'}
+              stats={[{ label: 'Dispenser', value: realtime.soapSummary.cardLabel }]}
+              details={realtime.soapSummary.details}
+            />
           </div>
         </div>
       ) : (
@@ -355,4 +401,16 @@ function formatWaterStatus(water: WaterSensorData): string {
   const statusText = water.status || 'Data tidak ada';
   const digitalText = formatDigital(water.digital);
   return digitalText === 'Data tidak ada' ? statusText : `${statusText} (${digitalText})`;
+}
+
+function getAmoniaSeverity(score: number | undefined): SensorSeverity {
+  if (typeof score === 'number' && Number.isFinite(score)) {
+    if (score >= 4) {
+      return 'critical';
+    }
+    if (score >= 3) {
+      return 'warning';
+    }
+  }
+  return 'normal';
 }
