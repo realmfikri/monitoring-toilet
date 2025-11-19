@@ -1,4 +1,5 @@
-import { useCallback, useMemo, useState } from 'react';
+import { ReactNode, useCallback, useMemo, useState } from 'react';
+import { FaPumpSoap, FaToiletPaper, FaWater, FaWind } from 'react-icons/fa6';
 import {
   AmmoniaSensorData,
   LatestDeviceSnapshot,
@@ -53,6 +54,8 @@ interface SensorCardProps {
   stats: SensorCardStat[];
   severity?: SensorSeverity;
   details?: string[];
+  icon?: ReactNode;
+  iconClassName?: string;
 }
 
 const StatusBadge = ({ status, label }: StatusBadgeProps) => (
@@ -62,10 +65,20 @@ const StatusBadge = ({ status, label }: StatusBadgeProps) => (
   </div>
 );
 
-const SensorCard = ({ title, stats, severity = 'normal', details = [] }: SensorCardProps) => (
+const SensorCard = ({
+  title,
+  stats,
+  severity = 'normal',
+  details = [],
+  icon,
+  iconClassName
+}: SensorCardProps) => (
   <div className={`sensor-card severity-${severity}`}>
     <div className="sensor-card__title-row">
       <h3>{title}</h3>
+      {icon ? (
+        <div className={`sensor-card__icon ${iconClassName ?? ''}`.trim()}>{icon}</div>
+      ) : null}
     </div>
     <div className="sensor-card__stats">
       {stats.map(stat => (
@@ -186,32 +199,40 @@ export default function DeviceSection({
         <div className="realtime-content">
           {header}
           <div className="top-row">
-            <SensorCard
-              title="Amonia"
-              severity={getAmoniaSeverity(realtime.amonia.score)}
-              stats={[
-                { label: 'NH₃', value: formatPpm(realtime.amonia.ppm) },
+          <SensorCard
+            title="Amonia"
+            icon={<FaWind />}
+            iconClassName="sensor-card__icon--ammonia"
+            severity={getAmoniaSeverity(realtime.amonia.score)}
+            stats={[
+              { label: 'NH₃', value: formatPpm(realtime.amonia.ppm) },
                 { label: 'Skor Bau', value: formatScore(realtime.amonia.score) }
               ]}
               details={[`Interpretasi: ${realtime.amonia.status || 'Data tidak ada'}`]}
             />
-            <SensorCard
-              title="Genangan Air"
-              severity={realtime.water.status.toLowerCase().includes('terdeteksi') ? 'critical' : 'normal'}
-              stats={[{ label: 'Nilai Digital', value: formatDigital(realtime.water.digital) }]}
-              details={[`Status: ${realtime.water.status || 'Data tidak ada'}`]}
-            />
-            <SensorCard
-              title={`Tisu (${realtime.tissueSummary.cardLabel})`}
-              severity={realtime.tissueSummary.critical ? 'critical' : 'normal'}
-              stats={[{ label: 'Slot', value: realtime.tissueSummary.cardLabel }]}
-              details={realtime.tissueSummary.details}
-            />
-            <SensorCard
-              title={`Sabun (${realtime.soapSummary.cardLabel})`}
-              severity={realtime.soapSummary.critical ? 'critical' : 'normal'}
-              stats={[{ label: 'Dispenser', value: realtime.soapSummary.cardLabel }]}
-              details={realtime.soapSummary.details}
+          <SensorCard
+            title="Genangan Air"
+            icon={<FaWater />}
+            iconClassName="sensor-card__icon--water"
+            severity={realtime.water.status.toLowerCase().includes('terdeteksi') ? 'critical' : 'normal'}
+            stats={[{ label: 'Nilai Digital', value: formatDigital(realtime.water.digital) }]}
+            details={[`Status: ${realtime.water.status || 'Data tidak ada'}`]}
+          />
+          <SensorCard
+            title={`Tisu (${realtime.tissueSummary.cardLabel})`}
+            icon={<FaToiletPaper />}
+            iconClassName="sensor-card__icon--tissue"
+            severity={realtime.tissueSummary.critical ? 'critical' : 'normal'}
+            stats={[{ label: 'Slot', value: realtime.tissueSummary.cardLabel }]}
+            details={realtime.tissueSummary.details}
+          />
+          <SensorCard
+            title={`Sabun (${realtime.soapSummary.cardLabel})`}
+            icon={<FaPumpSoap />}
+            iconClassName="sensor-card__icon--soap"
+            severity={realtime.soapSummary.critical ? 'critical' : 'normal'}
+            stats={[{ label: 'Dispenser', value: realtime.soapSummary.cardLabel }]}
+            details={realtime.soapSummary.details}
             />
           </div>
         </div>
