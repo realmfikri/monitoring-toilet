@@ -119,6 +119,7 @@ h1 {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
+  align-items: stretch;
   gap: 20px;
   margin-bottom: 20px;
 }
@@ -132,6 +133,69 @@ h1 {
   min-width: 280px;
   max-width: 420px;
   text-align: center;
+}
+
+.status-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+}
+
+.control-center {
+  background-color: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+  padding: 16px 20px;
+  flex: 1;
+  min-width: 320px;
+  max-width: 520px;
+  transition: box-shadow 0.3s ease;
+}
+
+.control-center__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.control-center__toolbar h2 {
+  margin: 0 0 4px;
+}
+
+.control-center__hint {
+  margin: 0;
+  color: #6c757d;
+  font-size: 0.9rem;
+}
+
+.settings-toggle {
+  background-color: #f0f2f5;
+  border: 1px solid #d0d7de;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+
+.settings-toggle:hover {
+  background-color: #e2e6ea;
+  transform: translateY(-1px);
+}
+
+.control-center__body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.4s ease, padding-top 0.3s ease;
+  padding-top: 0;
+}
+
+.control-center.open .control-center__body {
+  max-height: 1500px;
+  margin-top: 16px;
+  padding-top: 4px;
 }
 
 .control-card h3 {

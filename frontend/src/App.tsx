@@ -31,6 +31,7 @@ export default function App() {
   const [historyData, setHistoryData] = useState<HistoryDataMap>({});
   const [historyStatus, setHistoryStatus] = useState<Record<string, DeviceHistoryMeta>>({});
   const [sessionMessage, setSessionMessage] = useState<string | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const deviceIdsRef = useRef<string[]>([]);
   const historyStatusRef = useRef<Record<string, DeviceHistoryMeta>>({});
 
@@ -580,91 +581,109 @@ export default function App() {
       </div>
 
       <div id="header-controls">
-        <div className="control-card">
+        <div className="control-card status-card">
           <h2>Status Koneksi</h2>
           <h3 style={{ color: globalStatus.color }}>{globalStatus.text}</h3>
         </div>
 
-        <div className="control-card">
-          <h2>⚙️ Pengaturan Waktu & Notifikasi</h2>
-          <form id="config-form" onSubmit={handleConfigSubmit}>
-            <label htmlFor="historicalInterval">Interval Log &amp; Laporan Rutin (Menit, min 1):</label>
-            <input
-              type="number"
-              id="historicalInterval"
-              min={1}
-              value={configForm.historicalIntervalMinutes}
-              onChange={handleConfigInputChange('historicalIntervalMinutes')}
-            />
-
-            <label htmlFor="reminderInterval">Interval Waktu Pengulangan Reminder (Menit, min 1):</label>
-            <input
-              type="number"
-              id="reminderInterval"
-              min={1}
-              value={configForm.reminderIntervalMinutes}
-              onChange={handleConfigInputChange('reminderIntervalMinutes')}
-            />
-
-            <label htmlFor="maxReminders">Jumlah Reminder (setelah Alert Awal, min 0):</label>
-            <input
-              type="number"
-              id="maxReminders"
-              min={0}
-              value={configForm.maxReminders}
-              onChange={handleConfigInputChange('maxReminders')}
-            />
-
-            <label htmlFor="soapThreshold">Ambang Sabun Kosong (cm):</label>
-            <input
-              type="number"
-              id="soapThreshold"
-              min={0}
-              step="0.1"
-              value={configForm.soapEmptyThresholdCm}
-              onChange={handleConfigInputChange('soapEmptyThresholdCm')}
-            />
-
-            <label htmlFor="tissueEmptyValue">Nilai Digital Tisu Saat Habis (0 atau 1):</label>
-            <input
-              type="number"
-              id="tissueEmptyValue"
-              min={0}
-              max={1}
-              value={configForm.tissueEmptyValue}
-              onChange={handleConfigInputChange('tissueEmptyValue')}
-            />
-
-            <label htmlFor="ammoniaGood">Ambang Amonia (ppm) - Batas Aman:</label>
-            <input
-              type="number"
-              id="ammoniaGood"
-              min={0}
-              step="0.1"
-              value={configForm.ammoniaGoodMax}
-              onChange={handleConfigInputChange('ammoniaGoodMax')}
-            />
-
-            <label htmlFor="ammoniaWarning">Ambang Amonia (ppm) - Batas Peringatan:</label>
-            <input
-              type="number"
-              id="ammoniaWarning"
-              min={0}
-              step="0.1"
-              value={configForm.ammoniaWarningMax}
-              onChange={handleConfigInputChange('ammoniaWarningMax')}
-            />
-
-            <button id="saveConfigBtn" type="submit" disabled={isSavingConfig}>
-              {isSavingConfig ? 'Menyimpan...' : 'Simpan Konfigurasi'}
+        <section className={`control-center ${isSettingsOpen ? 'open' : ''}`}>
+          <div className="control-center__toolbar">
+            <div>
+              <h2>⚙️ Pengaturan Waktu & Notifikasi</h2>
+              <p className="control-center__hint">Atur jadwal laporan dan ambang notifikasi.</p>
+            </div>
+            <button
+              type="button"
+              className="settings-toggle"
+              onClick={() => setIsSettingsOpen(prev => !prev)}
+              aria-expanded={isSettingsOpen}
+              aria-controls="control-center-panel"
+            >
+              {isSettingsOpen ? 'Tutup Pengaturan' : '⚙️ Settings'}
             </button>
-            {configMessage && (
-              <p id="configMessage" style={{ color: configMessage.type === 'success' ? 'green' : 'red' }}>
-                {configMessage.text}
-              </p>
+          </div>
+          <div className="control-center__body" id="control-center-panel">
+            {isSettingsOpen && (
+              <form id="config-form" onSubmit={handleConfigSubmit}>
+                <label htmlFor="historicalInterval">Interval Log &amp; Laporan Rutin (Menit, min 1):</label>
+                <input
+                  type="number"
+                  id="historicalInterval"
+                  min={1}
+                  value={configForm.historicalIntervalMinutes}
+                  onChange={handleConfigInputChange('historicalIntervalMinutes')}
+                />
+
+                <label htmlFor="reminderInterval">Interval Waktu Pengulangan Reminder (Menit, min 1):</label>
+                <input
+                  type="number"
+                  id="reminderInterval"
+                  min={1}
+                  value={configForm.reminderIntervalMinutes}
+                  onChange={handleConfigInputChange('reminderIntervalMinutes')}
+                />
+
+                <label htmlFor="maxReminders">Jumlah Reminder (setelah Alert Awal, min 0):</label>
+                <input
+                  type="number"
+                  id="maxReminders"
+                  min={0}
+                  value={configForm.maxReminders}
+                  onChange={handleConfigInputChange('maxReminders')}
+                />
+
+                <label htmlFor="soapThreshold">Ambang Sabun Kosong (cm):</label>
+                <input
+                  type="number"
+                  id="soapThreshold"
+                  min={0}
+                  step="0.1"
+                  value={configForm.soapEmptyThresholdCm}
+                  onChange={handleConfigInputChange('soapEmptyThresholdCm')}
+                />
+
+                <label htmlFor="tissueEmptyValue">Nilai Digital Tisu Saat Habis (0 atau 1):</label>
+                <input
+                  type="number"
+                  id="tissueEmptyValue"
+                  min={0}
+                  max={1}
+                  value={configForm.tissueEmptyValue}
+                  onChange={handleConfigInputChange('tissueEmptyValue')}
+                />
+
+                <label htmlFor="ammoniaGood">Ambang Amonia (ppm) - Batas Aman:</label>
+                <input
+                  type="number"
+                  id="ammoniaGood"
+                  min={0}
+                  step="0.1"
+                  value={configForm.ammoniaGoodMax}
+                  onChange={handleConfigInputChange('ammoniaGoodMax')}
+                />
+
+                <label htmlFor="ammoniaWarning">Ambang Amonia (ppm) - Batas Peringatan:</label>
+                <input
+                  type="number"
+                  id="ammoniaWarning"
+                  min={0}
+                  step="0.1"
+                  value={configForm.ammoniaWarningMax}
+                  onChange={handleConfigInputChange('ammoniaWarningMax')}
+                />
+
+                <button id="saveConfigBtn" type="submit" disabled={isSavingConfig}>
+                  {isSavingConfig ? 'Menyimpan...' : 'Simpan Konfigurasi'}
+                </button>
+                {configMessage && (
+                  <p id="configMessage" style={{ color: configMessage.type === 'success' ? 'green' : 'red' }}>
+                    {configMessage.text}
+                  </p>
+                )}
+              </form>
             )}
-          </form>
-        </div>
+          </div>
+        </section>
       </div>
 
       <hr />
