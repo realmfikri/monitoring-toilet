@@ -242,9 +242,9 @@ h1 {
 }
 
 #main-container {
-  display: flex;
-  flex-direction: column;
-  gap: 40px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 24px;
   margin-bottom: 60px;
 }
 
@@ -257,7 +257,10 @@ h1 {
   background-color: #fff;
   border-radius: 12px;
   box-shadow: 0 6px 12px rgba(0, 0, 0, 0.12);
-  padding: 30px;
+  padding: 24px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .device-section-container h2 {
@@ -458,6 +461,16 @@ h1 {
 
 .history-drawer__footer .loadMoreButton {
   margin-top: 0;
+}
+
+@media (max-width: 480px) {
+  #main-container {
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  }
+
+  .device-section-container {
+    padding: 20px;
+  }
 }
 
 @media (max-width: 768px) {
