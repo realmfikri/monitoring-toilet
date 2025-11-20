@@ -198,6 +198,7 @@ const ESP_INACTIVE_THRESHOLD_MS = 30000;
 const INACTIVITY_CHECK_INTERVAL_MS = 5000;
 
 const latestSnapshotRepository = new LatestSnapshotRepository(prisma);
+const WEBSOCKET_PING_INTERVAL_MS = 30000;
 const historyRepository = new HistoryRepository(prisma);
 const subscriberRepository = new TelegramSubscriberRepository(prisma);
 const configRepository = new ConfigOverrideRepository(prisma);
@@ -563,7 +564,37 @@ const requireApiKey: express.RequestHandler = (req, res, next) => {
 const port = Number.parseInt(process.env.PORT ?? '3000', 10);
 const host = process.env.HOST ?? '0.0.0.0';
 
+type HeartbeatWebSocket = WebSocket & { isAlive?: boolean };
+
 const wss = new WebSocketServer({ server, path: '/ws/latest' });
+
+const websocketHeartbeatInterval = setInterval(() => {
+  wss.clients.forEach(client => {
+    const socket = client as HeartbeatWebSocket;
+
+    if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+      websocketClients.delete(socket);
+      return;
+    }
+
+    if (socket.isAlive === false) {
+      websocketClients.delete(socket);
+      socket.terminate();
+      return;
+    }
+
+    if (socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    socket.isAlive = false;
+    socket.ping();
+  });
+}, WEBSOCKET_PING_INTERVAL_MS);
+
+wss.on('close', () => {
+  clearInterval(websocketHeartbeatInterval);
+});
 
 wss.on('connection', (socket: WebSocket, request: IncomingMessage) => {
   (async () => {
@@ -595,6 +626,9 @@ wss.on('connection', (socket: WebSocket, request: IncomingMessage) => {
         return;
       }
 
+      const heartbeatSocket = socket as HeartbeatWebSocket;
+      heartbeatSocket.isAlive = true;
+
       websocketClients.add(socket);
 
       if (Object.keys(latestData).length > 0) {
@@ -603,6 +637,10 @@ wss.on('connection', (socket: WebSocket, request: IncomingMessage) => {
 
       socket.on('close', () => {
         websocketClients.delete(socket);
+      });
+
+      socket.on('pong', () => {
+        heartbeatSocket.isAlive = true;
       });
 
       socket.on('error', (error: Error) => {

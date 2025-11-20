@@ -22,6 +22,9 @@ interface DeviceHistoryMeta {
   isLoading: boolean;
 }
 
+const WEBSOCKET_HEARTBEAT_INTERVAL_MS = 15000;
+const WEBSOCKET_INACTIVITY_THRESHOLD_MS = 45000;
+
 export default function App() {
   const { token, user, logout } = useAuth();
   const [config, setConfig] = useState<Config | null>(null);
@@ -40,6 +43,10 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const deviceIdsRef = useRef<string[]>([]);
   const historyStatusRef = useRef<Record<string, DeviceHistoryMeta>>({});
+  const websocketHeartbeatRef = useRef({
+    lastMessageAt: 0,
+    intervalId: null as number | null
+  });
 
   const handleLogout = useCallback(() => {
     setConfig(null);
@@ -319,6 +326,37 @@ export default function App() {
     let pollingIntervalId: number | null = null;
     let shouldReconnect = true;
 
+    const stopHeartbeat = () => {
+      const heartbeat = websocketHeartbeatRef.current;
+      if (heartbeat.intervalId !== null) {
+        window.clearInterval(heartbeat.intervalId);
+        heartbeat.intervalId = null;
+      }
+    };
+
+    const startHeartbeat = () => {
+      stopHeartbeat();
+      websocketHeartbeatRef.current.lastMessageAt = Date.now();
+      websocketHeartbeatRef.current.intervalId = window.setInterval(() => {
+        const now = Date.now();
+        const { lastMessageAt } = websocketHeartbeatRef.current;
+
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+          if (now - lastMessageAt > WEBSOCKET_INACTIVITY_THRESHOLD_MS) {
+            websocket.close();
+            return;
+          }
+
+          try {
+            websocket.send(JSON.stringify({ type: 'ping' }));
+          } catch (error) {
+            console.error('Failed to send WebSocket heartbeat:', error);
+            websocket.close();
+          }
+        }
+      }, WEBSOCKET_HEARTBEAT_INTERVAL_MS);
+    };
+
     const stopPollingLatestData = () => {
       if (pollingIntervalId !== null) {
         window.clearInterval(pollingIntervalId);
@@ -348,6 +386,8 @@ export default function App() {
 
       socket.addEventListener('open', () => {
         stopPollingLatestData();
+        websocketHeartbeatRef.current.lastMessageAt = Date.now();
+        startHeartbeat();
       });
 
       socket.addEventListener('message', event => {
@@ -356,6 +396,7 @@ export default function App() {
         }
 
         try {
+          websocketHeartbeatRef.current.lastMessageAt = Date.now();
           const message = JSON.parse(event.data) as
             | { type: 'init'; payload: LatestDataMap }
             | { type: 'snapshot'; payload: LatestDeviceSnapshot };
@@ -373,6 +414,7 @@ export default function App() {
 
       socket.addEventListener('close', event => {
         websocket = null;
+        stopHeartbeat();
         if (event.code === 4401) {
           shouldReconnect = false;
           if (reconnectTimeoutId !== null) {
@@ -405,6 +447,7 @@ export default function App() {
       if (reconnectTimeoutId !== null) {
         window.clearTimeout(reconnectTimeoutId);
       }
+      stopHeartbeat();
       stopPollingLatestData();
       websocket?.close();
     };
