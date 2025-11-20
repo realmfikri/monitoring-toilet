@@ -16,15 +16,12 @@ export interface ConfigOverrideRecord {
   historicalIntervalMinutes: number;
   maxReminders: number;
   reminderIntervalMinutes: number;
-  soapEmptyThresholdCm: number;
-  tissueEmptyValue: number;
-  ammoniaLimits: {
-    goodMax: number;
-    warningMax: number;
-  };
 }
 
 export interface SubscriberRecord {
   chatId: string;
   lantai: number;
 }
+
+export type SensorKey = 'amonia' | 'water' | 'sabun1' | 'sabun2' | 'sabun3' | 'tisu1' | 'tisu2';
+export type DeviceSensorConfig = Record<SensorKey, boolean>;

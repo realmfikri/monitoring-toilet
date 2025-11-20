@@ -17,27 +17,6 @@ const parseNumber = (value: unknown): number | null => {
   return null;
 };
 
-const parseAmmoniaLimits = (
-  value: unknown
-): ConfigOverrideRecord['ammoniaLimits'] | null => {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return null;
-  }
-
-  const raw = value as Record<string, unknown>;
-  const goodMax = parseNumber(raw.goodMax);
-  const warningMax = parseNumber(raw.warningMax);
-
-  if (goodMax === null || warningMax === null || warningMax <= goodMax) {
-    return null;
-  }
-
-  return {
-    goodMax,
-    warningMax
-  };
-};
-
 export class ConfigOverrideRepository {
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -55,30 +34,14 @@ export class ConfigOverrideRepository {
     const historical = parseNumber(raw.historicalIntervalMinutes);
     const reminders = parseNumber(raw.maxReminders);
     const reminderInterval = parseNumber(raw.reminderIntervalMinutes);
-    const soapEmptyThreshold = parseNumber(raw.soapEmptyThresholdCm);
-    const tissueEmptyValue = parseNumber(raw.tissueEmptyValue);
-    const ammoniaLimits = parseAmmoniaLimits(raw.ammoniaLimits);
-
-    if (
-      historical === null ||
-      reminders === null ||
-      reminderInterval === null ||
-      soapEmptyThreshold === null ||
-      tissueEmptyValue === null ||
-      !Number.isInteger(tissueEmptyValue) ||
-      (tissueEmptyValue !== 0 && tissueEmptyValue !== 1) ||
-      ammoniaLimits === null
-    ) {
+    if (historical === null || reminders === null || reminderInterval === null) {
       return null;
     }
 
     return {
       historicalIntervalMinutes: historical,
       maxReminders: reminders,
-      reminderIntervalMinutes: reminderInterval,
-      soapEmptyThresholdCm: soapEmptyThreshold,
-      tissueEmptyValue,
-      ammoniaLimits
+      reminderIntervalMinutes: reminderInterval
     };
   }
 
@@ -86,10 +49,7 @@ export class ConfigOverrideRepository {
     const serializedConfig: Prisma.JsonObject = {
       historicalIntervalMinutes: config.historicalIntervalMinutes,
       maxReminders: config.maxReminders,
-      reminderIntervalMinutes: config.reminderIntervalMinutes,
-      soapEmptyThresholdCm: config.soapEmptyThresholdCm,
-      tissueEmptyValue: config.tissueEmptyValue,
-      ammoniaLimits: config.ammoniaLimits
+      reminderIntervalMinutes: config.reminderIntervalMinutes
     };
 
     await this.prisma.configOverride.upsert({

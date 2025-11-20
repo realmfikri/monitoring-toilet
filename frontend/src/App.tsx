@@ -3,7 +3,16 @@ import DeviceSection from './components/DeviceSection';
 import LoginForm from './components/LoginForm';
 import { AuthenticatedUser, useAuth } from './auth/AuthContext';
 import { buildApiUrl, buildWsUrl } from './api';
-import { Config, DeviceHistoryResponse, HistoryDataMap, LatestDataMap, LatestDeviceSnapshot } from './types';
+import {
+  Config,
+  DEFAULT_SENSOR_CONFIG,
+  DeviceHistoryResponse,
+  DeviceSensorConfig,
+  DeviceSettingsResponse,
+  HistoryDataMap,
+  LatestDataMap,
+  LatestDeviceSnapshot
+} from './types';
 
 type ConfigMessage = { type: 'success' | 'error'; text: string } | null;
 
@@ -19,15 +28,12 @@ export default function App() {
   const [configForm, setConfigForm] = useState({
     historicalIntervalMinutes: '5',
     reminderIntervalMinutes: '10',
-    maxReminders: '3',
-    soapEmptyThresholdCm: '10',
-    tissueEmptyValue: '0',
-    ammoniaGoodMax: '1.5',
-    ammoniaWarningMax: '3'
+    maxReminders: '3'
   });
   const [configMessage, setConfigMessage] = useState<ConfigMessage>(null);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [latestData, setLatestData] = useState<LatestDataMap>({});
+  const [deviceSensorSettings, setDeviceSensorSettings] = useState<Record<string, DeviceSensorConfig>>({});
   const [historyData, setHistoryData] = useState<HistoryDataMap>({});
   const [historyStatus, setHistoryStatus] = useState<Record<string, DeviceHistoryMeta>>({});
   const [sessionMessage, setSessionMessage] = useState<string | null>(null);
@@ -38,6 +44,7 @@ export default function App() {
   const handleLogout = useCallback(() => {
     setConfig(null);
     setLatestData({});
+    setDeviceSensorSettings({});
     setHistoryData({});
     setHistoryStatus({});
     deviceIdsRef.current = [];
@@ -78,11 +85,7 @@ export default function App() {
       setConfigForm({
         historicalIntervalMinutes: String(data.historicalIntervalMinutes),
         reminderIntervalMinutes: String(data.reminderIntervalMinutes),
-        maxReminders: String(data.maxReminders),
-        soapEmptyThresholdCm: String(data.soapEmptyThresholdCm),
-        tissueEmptyValue: String(data.tissueEmptyValue),
-        ammoniaGoodMax: String(data.ammoniaLimits.goodMax),
-        ammoniaWarningMax: String(data.ammoniaLimits.warningMax)
+        maxReminders: String(data.maxReminders)
       });
     } catch (error) {
       console.error('Error loading configuration:', error);
@@ -108,11 +111,83 @@ export default function App() {
         throw new Error(await response.text());
       }
       const data: LatestDataMap = await response.json();
-      setLatestData(data);
+      setLatestData(() => ({ ...data }));
     } catch (error) {
       console.error('Error fetching real-time data:', error);
     }
   }, [token, handleUnauthorized]);
+
+  const loadDeviceSensorSettings = useCallback(
+    async (deviceId: string): Promise<DeviceSensorConfig> => {
+      if (!token) {
+        throw new Error('Sesi login tidak valid.');
+      }
+
+      const response = await fetch(buildApiUrl(`/api/device/${encodeURIComponent(deviceId)}/settings`), {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        handleUnauthorized();
+        throw new Error('Sesi berakhir. Silakan login ulang.');
+      }
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const payload: DeviceSettingsResponse = await response.json();
+      setDeviceSensorSettings(prev => ({ ...prev, [deviceId]: payload.sensorConfig }));
+      setLatestData(prev => {
+        const existing = prev[deviceId];
+        if (!existing) {
+          return prev;
+        }
+        return { ...prev, [deviceId]: { ...existing, sensorConfig: payload.sensorConfig } };
+      });
+      return payload.sensorConfig;
+    },
+    [token, handleUnauthorized]
+  );
+
+  const saveDeviceSensorSettings = useCallback(
+    async (deviceId: string, sensorConfig: DeviceSensorConfig): Promise<void> => {
+      if (!token) {
+        throw new Error('Sesi login tidak valid.');
+      }
+
+      const response = await fetch(buildApiUrl(`/api/device/${encodeURIComponent(deviceId)}/settings`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ sensorConfig })
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        handleUnauthorized();
+        throw new Error('Sesi berakhir. Silakan login ulang.');
+      }
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const payload: DeviceSettingsResponse = await response.json();
+      setDeviceSensorSettings(prev => ({ ...prev, [deviceId]: payload.sensorConfig }));
+      setLatestData(prev => {
+        const existing = prev[deviceId];
+        if (!existing) {
+          return prev;
+        }
+        return { ...prev, [deviceId]: { ...existing, sensorConfig: payload.sensorConfig } };
+      });
+    },
+    [token, handleUnauthorized]
+  );
 
   const fetchHistoryForDevice = useCallback(
     async (deviceId: string, cursor?: string | null, append = false) => {
@@ -266,7 +341,7 @@ export default function App() {
             | { type: 'snapshot'; payload: LatestDeviceSnapshot };
 
           if (message.type === 'init') {
-            setLatestData(message.payload);
+            setLatestData(() => ({ ...message.payload }));
           } else if (message.type === 'snapshot') {
             const snapshot = message.payload;
             setLatestData(prev => ({ ...prev, [snapshot.deviceID]: snapshot }));
@@ -355,13 +430,7 @@ export default function App() {
       const payload: Config = {
         historicalIntervalMinutes: Number.parseInt(configForm.historicalIntervalMinutes, 10),
         reminderIntervalMinutes: Number.parseInt(configForm.reminderIntervalMinutes, 10),
-        maxReminders: Number.parseInt(configForm.maxReminders, 10),
-        soapEmptyThresholdCm: Number.parseFloat(configForm.soapEmptyThresholdCm),
-        tissueEmptyValue: Number.parseInt(configForm.tissueEmptyValue, 10),
-        ammoniaLimits: {
-          goodMax: Number.parseFloat(configForm.ammoniaGoodMax),
-          warningMax: Number.parseFloat(configForm.ammoniaWarningMax)
-        }
+        maxReminders: Number.parseInt(configForm.maxReminders, 10)
       };
 
       const response = await fetch(buildApiUrl('/api/config'), {
@@ -408,6 +477,18 @@ export default function App() {
   useEffect(() => {
     deviceIdsRef.current = deviceIds;
   }, [deviceIds]);
+
+  useEffect(() => {
+    setDeviceSensorSettings(prev => {
+      const next = { ...prev };
+      Object.values(latestData).forEach(snapshot => {
+        if (snapshot.sensorConfig) {
+          next[snapshot.deviceID] = snapshot.sensorConfig;
+        }
+      });
+      return next;
+    });
+  }, [latestData]);
 
   useEffect(() => {
     if (!token) {
@@ -632,46 +713,6 @@ export default function App() {
                   onChange={handleConfigInputChange('maxReminders')}
                 />
 
-                <label htmlFor="soapThreshold">Ambang Sabun Kosong (cm):</label>
-                <input
-                  type="number"
-                  id="soapThreshold"
-                  min={0}
-                  step="0.1"
-                  value={configForm.soapEmptyThresholdCm}
-                  onChange={handleConfigInputChange('soapEmptyThresholdCm')}
-                />
-
-                <label htmlFor="tissueEmptyValue">Nilai Digital Tisu Saat Habis (0 atau 1):</label>
-                <input
-                  type="number"
-                  id="tissueEmptyValue"
-                  min={0}
-                  max={1}
-                  value={configForm.tissueEmptyValue}
-                  onChange={handleConfigInputChange('tissueEmptyValue')}
-                />
-
-                <label htmlFor="ammoniaGood">Ambang Amonia (ppm) - Batas Aman:</label>
-                <input
-                  type="number"
-                  id="ammoniaGood"
-                  min={0}
-                  step="0.1"
-                  value={configForm.ammoniaGoodMax}
-                  onChange={handleConfigInputChange('ammoniaGoodMax')}
-                />
-
-                <label htmlFor="ammoniaWarning">Ambang Amonia (ppm) - Batas Peringatan:</label>
-                <input
-                  type="number"
-                  id="ammoniaWarning"
-                  min={0}
-                  step="0.1"
-                  value={configForm.ammoniaWarningMax}
-                  onChange={handleConfigInputChange('ammoniaWarningMax')}
-                />
-
                 <button id="saveConfigBtn" type="submit" disabled={isSavingConfig}>
                   {isSavingConfig ? 'Menyimpan...' : 'Simpan Konfigurasi'}
                 </button>
@@ -701,8 +742,14 @@ export default function App() {
                 data={latestData[deviceId]}
                 history={historyData[deviceId] ?? []}
                 displayName={resolveDisplayName(deviceId)}
+                sensorConfig={deviceSensorSettings[deviceId] ?? latestData[deviceId]?.sensorConfig ?? DEFAULT_SENSOR_CONFIG}
                 canRename={isSupervisor}
                 onRename={isSupervisor ? handleRenameDevice : undefined}
+                canManageSensors={isSupervisor}
+                onLoadSensorSettings={isSupervisor ? () => loadDeviceSensorSettings(deviceId) : undefined}
+                onSaveSensorSettings={
+                  isSupervisor ? config => saveDeviceSensorSettings(deviceId, config) : undefined
+                }
                 onDownloadHistory={() => handleDownloadHistory(deviceId)}
                 onLoadMoreHistory={historyMeta?.hasMore ? () => handleLoadMoreHistory(deviceId) : undefined}
                 hasMoreHistory={historyMeta?.hasMore ?? false}

@@ -21,10 +21,11 @@ import { appConfig, getConfiguredApiKeys, isAllowedOrigin, isValidApiKey } from 
 import { prisma } from './database/prismaClient';
 import { accessLogger, appLogger } from './logger';
 import { ConfigOverrideRepository } from './repositories/configOverrideRepository';
+import { DeviceSettingsRepository } from './repositories/deviceSettingsRepository';
 import { HistoryRepository } from './repositories/historyRepository';
 import { LatestSnapshotRepository } from './repositories/latestSnapshotRepository';
 import { TelegramSubscriberRepository } from './repositories/telegramSubscriberRepository';
-import type { SnapshotRecord } from './repositories/types';
+import type { DeviceSensorConfig, SensorKey, SnapshotRecord } from './repositories/types';
 
 type UserRole = $Enums.UserRole;
 
@@ -53,13 +54,7 @@ interface AmmoniaLimitsConfig {
   warningMax: number;
 }
 
-interface ThresholdConfig {
-  soapEmptyThresholdCm: number;
-  tissueEmptyValue: number;
-  ammoniaLimits: AmmoniaLimitsConfig;
-}
-
-interface ConfigBase extends ThresholdConfig {
+interface ConfigBase {
   historicalIntervalMinutes: number;
   maxReminders: number;
   reminderIntervalMinutes: number;
@@ -70,6 +65,8 @@ interface Config extends ConfigBase {
   reminderIntervalMs: number;
   maxAlertDurationMs: number;
 }
+
+type DeviceSensorConfigMap = Record<string, DeviceSensorConfig>;
 
 interface PetugasAssignment {
   lantai: number;
@@ -95,6 +92,7 @@ interface LatestDeviceSnapshot {
   timestamp: string;
   espStatus: EspStatus;
   lastActive: number;
+  sensorConfig?: DeviceSensorConfig;
 }
 
 interface DeviceStatus {
@@ -180,6 +178,21 @@ interface ComputedSensorSnapshot {
   tisu: TissueSensorData;
 }
 
+const SENSOR_KEYS: SensorKey[] = ['amonia', 'water', 'sabun1', 'sabun2', 'sabun3', 'tisu1', 'tisu2'];
+const DEFAULT_SENSOR_CONFIG: DeviceSensorConfig = {
+  amonia: true,
+  water: true,
+  sabun1: true,
+  sabun2: true,
+  sabun3: true,
+  tisu1: true,
+  tisu2: true
+};
+
+const SOAP_EMPTY_THRESHOLD_CM = 10;
+const TISSUE_EMPTY_VALUE = 0;
+const AMMONIA_LIMITS: AmmoniaLimitsConfig = { goodMax: 1.5, warningMax: 3 };
+
 const SOAP_DEBOUNCE_MS = 5000;
 const ESP_INACTIVE_THRESHOLD_MS = 30000;
 const INACTIVITY_CHECK_INTERVAL_MS = 5000;
@@ -188,23 +201,19 @@ const latestSnapshotRepository = new LatestSnapshotRepository(prisma);
 const historyRepository = new HistoryRepository(prisma);
 const subscriberRepository = new TelegramSubscriberRepository(prisma);
 const configRepository = new ConfigOverrideRepository(prisma);
+const deviceSettingsRepository = new DeviceSettingsRepository(prisma);
 
 const DEFAULT_CONFIG_BASE: ConfigBase = {
   historicalIntervalMinutes: 5,
   maxReminders: 3,
-  reminderIntervalMinutes: 10,
-  soapEmptyThresholdCm: 10,
-  tissueEmptyValue: 0,
-  ammoniaLimits: {
-    goodMax: 1.5,
-    warningMax: 3
-  }
+  reminderIntervalMinutes: 10
 };
 
 const DEFAULT_CONFIG = deriveConfig(DEFAULT_CONFIG_BASE);
 
 let config: Config = DEFAULT_CONFIG;
 let petugas: Record<string, PetugasAssignment> = {};
+const deviceSensorSettings: DeviceSensorConfigMap = {};
 
 interface DeviceMuteEntry {
   mutedUntil: number;
@@ -418,29 +427,22 @@ const requestRateLimiter = rateLimit({
 app.use(requestRateLimiter);
 app.use(express.json({ limit: '1mb' }));
 
-const ammoniaLimitsSchema = z
-  .object({
-    goodMax: z.coerce.number().min(0, 'ammoniaLimits.goodMax must be a number >= 0.'),
-    warningMax: z.coerce.number().min(0, 'ammoniaLimits.warningMax must be a number >= 0.')
-  })
-  .refine(data => data.warningMax > data.goodMax, {
-    message: 'ammoniaLimits.warningMax must be greater than ammoniaLimits.goodMax.',
-    path: ['warningMax']
-  });
-
 const configUpdateSchema = z.object({
   historicalIntervalMinutes: z.coerce.number().int().min(1, 'historicalIntervalMinutes must be an integer >= 1.'),
   maxReminders: z.coerce.number().int().min(0, 'maxReminders must be an integer >= 0.'),
-  reminderIntervalMinutes: z.coerce.number().int().min(1, 'reminderIntervalMinutes must be an integer >= 1.'),
-  soapEmptyThresholdCm: z.coerce
-    .number()
-    .min(0, 'soapEmptyThresholdCm must be a number >= 0.'),
-  tissueEmptyValue: z.coerce
-    .number()
-    .int()
-    .min(0, 'tissueEmptyValue must be 0 or 1.')
-    .max(1, 'tissueEmptyValue must be 0 or 1.'),
-  ammoniaLimits: ammoniaLimitsSchema
+  reminderIntervalMinutes: z.coerce.number().int().min(1, 'reminderIntervalMinutes must be an integer >= 1.')
+});
+
+const sensorConfigSchema = z.object({
+  sensorConfig: z.object({
+    amonia: z.coerce.boolean(),
+    water: z.coerce.boolean(),
+    sabun1: z.coerce.boolean(),
+    sabun2: z.coerce.boolean(),
+    sabun3: z.coerce.boolean(),
+    tisu1: z.coerce.boolean(),
+    tisu2: z.coerce.boolean()
+  })
 });
 
 const loginSchema = z.object({
@@ -922,10 +924,7 @@ app.get('/api/config', authenticateRequest, (_req: Request, res: Response) => {
   res.json({
     historicalIntervalMinutes: config.historicalIntervalMinutes,
     maxReminders: config.maxReminders,
-    reminderIntervalMinutes: config.reminderIntervalMinutes,
-    soapEmptyThresholdCm: config.soapEmptyThresholdCm,
-    tissueEmptyValue: config.tissueEmptyValue,
-    ammoniaLimits: config.ammoniaLimits
+    reminderIntervalMinutes: config.reminderIntervalMinutes
   });
 });
 
@@ -936,21 +935,11 @@ app.post('/api/config', authenticateRequest, requireSupervisor, async (req: Requ
     return;
   }
 
-  const {
-    historicalIntervalMinutes,
-    maxReminders,
-    reminderIntervalMinutes,
-    soapEmptyThresholdCm,
-    tissueEmptyValue,
-    ammoniaLimits
-  } = parseResult.data;
+  const { historicalIntervalMinutes, maxReminders, reminderIntervalMinutes } = parseResult.data;
   const baseConfig: ConfigBase = {
     historicalIntervalMinutes,
     maxReminders,
-    reminderIntervalMinutes,
-    soapEmptyThresholdCm,
-    tissueEmptyValue,
-    ammoniaLimits
+    reminderIntervalMinutes
   };
 
   try {
@@ -962,6 +951,49 @@ app.post('/api/config', authenticateRequest, requireSupervisor, async (req: Requ
     res.status(500).json({ error: 'Failed to persist configuration overrides.' });
   }
 });
+
+app.get('/api/device/:deviceId/settings', authenticateRequest, async (req: Request, res: Response) => {
+  const { deviceId } = req.params;
+
+  try {
+    const sensorConfig = await getDeviceSensorConfig(deviceId);
+    res.status(200).json({ deviceId, sensorConfig });
+  } catch (error) {
+    req.log.error({ err: error, deviceId }, 'Failed to load device settings');
+    res.status(500).json({ error: 'Failed to load device settings.' });
+  }
+});
+
+app.post(
+  '/api/device/:deviceId/settings',
+  authenticateRequest,
+  requireSupervisor,
+  async (req: Request, res: Response) => {
+    const { deviceId } = req.params;
+    const parseResult = sensorConfigSchema.safeParse(req.body);
+
+    if (!parseResult.success) {
+      res.status(400).json({ error: 'Invalid sensor configuration payload.', details: parseResult.error.flatten() });
+      return;
+    }
+
+    const normalizedConfig = normalizeSensorConfig(parseResult.data.sensorConfig);
+
+    try {
+      await deviceSettingsRepository.upsert(deviceId, normalizedConfig);
+      deviceSensorSettings[deviceId] = normalizedConfig;
+
+      if (latestData[deviceId]) {
+        updateLatestData(deviceId, previous => ({ ...previous!, sensorConfig: normalizedConfig }));
+      }
+
+      res.status(200).json({ status: 'ok', deviceId, sensorConfig: normalizedConfig });
+    } catch (error) {
+      req.log.error({ err: error, deviceId }, 'Failed to persist device settings');
+      res.status(500).json({ error: 'Failed to persist device settings.' });
+    }
+  }
+);
 
 app.post('/data', requireApiKey, async (req: Request, res: Response) => {
   const parseResult = rawSensorPayloadSchema.safeParse(req.body);
@@ -976,7 +1008,8 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
 
   const now = Date.now();
   const normalized = normalizeSensorPayload(payload, req.log);
-  const computedSnapshot = computeSensorSnapshot(normalized, config);
+  const computedSnapshot = computeSensorSnapshot(normalized);
+  const sensorConfig = await getDeviceSensorConfig(deviceID);
   const serializedSnapshot = serializeComputedSnapshot(computedSnapshot);
 
   const latestSnapshot = updateLatestData(deviceID, previous => ({
@@ -988,7 +1021,8 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
     displayName: previous?.displayName ?? null,
     timestamp: new Date().toISOString(),
     espStatus: 'active',
-    lastActive: now
+    lastActive: now,
+    sensorConfig
   }));
 
   if (!deviceStatuses[deviceID]) {
@@ -1015,7 +1049,9 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
   const soap = computedSnapshot.sabun;
   const tissue = computedSnapshot.tisu;
 
-  const isAnySoapCritical = isSoapCritical(soap);
+  const soapMonitoringEnabled = isAnySensorEnabled(sensorConfig, ['sabun1', 'sabun2', 'sabun3']);
+
+  const isAnySoapCritical = soapMonitoringEnabled && isSoapCritical(soap);
 
   if (isAnySoapCritical) {
     if (status.soapStatusConfirmed === 'safe') {
@@ -1029,7 +1065,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
     status.soapPendingStartTime = 0;
   }
 
-  const activeAlerts = getActiveAlerts(deviceID, status.soapStatusConfirmed, tissue);
+  const activeAlerts = getActiveAlerts(deviceID, status.soapStatusConfirmed, tissue, sensorConfig);
   const isAlerting = activeAlerts.length > 0;
 
   if (isAlerting) {
@@ -1052,7 +1088,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
         status.alertStartTime = now;
         status.lastAlertSentTime = now;
         status.isRecoverySent = false;
-        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_new', {
+        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_new', sensorConfig, {
           logger: req.log,
           requestId: req.requestId
         });
@@ -1077,7 +1113,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
         );
       } else {
         status.lastAlertSentTime = now;
-        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_repeat', {
+        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, activeAlerts, 'accident_repeat', sensorConfig, {
           logger: req.log,
           requestId: req.requestId
         });
@@ -1104,7 +1140,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
           'Skipping recovery alert because device is muted'
         );
       } else {
-        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'recovery', {
+        sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'recovery', sensorConfig, {
           logger: req.log,
           requestId: req.requestId
         });
@@ -1132,7 +1168,7 @@ app.post('/data', requireApiKey, async (req: Request, res: Response) => {
           'Skipping routine alert because device is muted'
         );
         } else {
-          sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'routine', {
+          sendTelegramAlert(telegramBot, deviceID, latestData[deviceID], lantai, [], 'routine', sensorConfig, {
             logger: req.log,
             requestId: req.requestId
           });
@@ -1277,12 +1313,12 @@ function normalizeSensorPayload(payload: RawSensorPayload, logger: Logger): Norm
   };
 }
 
-function computeSensorSnapshot(payload: NormalizedSensorPayload, config: ConfigBase): ComputedSensorSnapshot {
+function computeSensorSnapshot(payload: NormalizedSensorPayload): ComputedSensorSnapshot {
   return {
-    amonia: computeAmmoniaStatus(payload.amonia, config.ammoniaLimits),
+    amonia: computeAmmoniaStatus(payload.amonia, AMMONIA_LIMITS),
     waterPuddle: computeWaterStatus(payload.waterPuddleJson),
-    sabun: computeSoapStatus(payload.sabun, config.soapEmptyThresholdCm),
-    tisu: computeTissueStatus(payload.tisu, config.tissueEmptyValue)
+    sabun: computeSoapStatus(payload.sabun, SOAP_EMPTY_THRESHOLD_CM),
+    tisu: computeTissueStatus(payload.tisu, TISSUE_EMPTY_VALUE)
   };
 }
 
@@ -1531,6 +1567,9 @@ function toSnapshotRecord(snapshot: LatestDeviceSnapshot): SnapshotRecord {
 }
 
 function toLatestDeviceSnapshot(record: SnapshotRecord): LatestDeviceSnapshot {
+  const sensorConfig = normalizeSensorConfig(deviceSensorSettings[record.deviceId] ?? DEFAULT_SENSOR_CONFIG);
+  deviceSensorSettings[record.deviceId] = sensorConfig;
+
   return {
     deviceID: record.deviceId,
     displayName: record.displayName,
@@ -1540,21 +1579,55 @@ function toLatestDeviceSnapshot(record: SnapshotRecord): LatestDeviceSnapshot {
     tisu: record.tisu,
     timestamp: record.timestamp.toISOString(),
     espStatus: record.espStatus,
-    lastActive: record.lastActive.getTime()
+    lastActive: record.lastActive.getTime(),
+    sensorConfig
   };
 }
 
-function getActiveAlerts(_deviceID: string, soapStatusConfirmed: SoapStatus, tissue: TissueSensorData): string[] {
+function normalizeSensorConfig(config: Partial<DeviceSensorConfig>): DeviceSensorConfig {
+  const normalized: DeviceSensorConfig = { ...DEFAULT_SENSOR_CONFIG };
+  SENSOR_KEYS.forEach(key => {
+    const value = config[key];
+    normalized[key] = typeof value === 'boolean' ? value : DEFAULT_SENSOR_CONFIG[key];
+  });
+  return normalized;
+}
+
+async function getDeviceSensorConfig(deviceID: string): Promise<DeviceSensorConfig> {
+  const existing = deviceSensorSettings[deviceID];
+  if (existing) {
+    return existing;
+  }
+
+  const stored = await deviceSettingsRepository.get(deviceID);
+  const normalized = normalizeSensorConfig(stored ?? DEFAULT_SENSOR_CONFIG);
+  deviceSensorSettings[deviceID] = normalized;
+  return normalized;
+}
+
+function isAnySensorEnabled(config: DeviceSensorConfig, keys: SensorKey[]): boolean {
+  return keys.some(key => config[key]);
+}
+
+function getActiveAlerts(
+  _deviceID: string,
+  soapStatusConfirmed: SoapStatus,
+  tissue: TissueSensorData,
+  sensorConfig: DeviceSensorConfig
+): string[] {
   const alerts: string[] = [];
 
-  if (soapStatusConfirmed === 'critical') {
+  if (isAnySensorEnabled(sensorConfig, ['sabun1', 'sabun2', 'sabun3']) && soapStatusConfirmed === 'critical') {
     alerts.push('SABUN HAMPIR HABIS');
   }
 
   const statusTisu1 = tissue.tisu1.status;
   const statusTisu2 = tissue.tisu2.status;
 
-  if (statusTisu1 === 'Habis' || statusTisu2 === 'Habis') {
+  if (
+    (sensorConfig.tisu1 && statusTisu1 === 'Habis') ||
+    (sensorConfig.tisu2 && statusTisu2 === 'Habis')
+  ) {
     alerts.push('TISU HAMPIR HABIS');
   }
 
@@ -1669,6 +1742,7 @@ function sendTelegramAlert(
   lantai: number,
   activeAlerts: string[],
   type: AlertType,
+  sensorConfig: DeviceSensorConfig,
   context: { logger?: Logger; requestId?: string } = {}
 ) {
   if (!bot) {
@@ -1690,11 +1764,20 @@ function sendTelegramAlert(
   const tissue = parseJson<TissueSensorData>(sensorData.tisu, defaultTissueData(), logger);
   const timestamp = new Date(sensorData.timestamp).toLocaleString();
 
-  const isAnySoapCritical = isSoapCritical(soap);
-  const isAnyTissueCritical = tissue.tisu1.status === 'Habis' || tissue.tisu2.status === 'Habis';
+  const normalizedSensorConfig = normalizeSensorConfig(sensorData.sensorConfig ?? sensorConfig);
+  const soapEnabled = isAnySensorEnabled(normalizedSensorConfig, ['sabun1', 'sabun2', 'sabun3']);
+  const tissueEnabled = isAnySensorEnabled(normalizedSensorConfig, ['tisu1', 'tisu2']);
+  const ammoniaEnabled = normalizedSensorConfig.amonia;
+  const waterEnabled = normalizedSensorConfig.water;
 
-  const soapStatusKeseluruhan = isAnySoapCritical ? 'HAMPIR HABIS' : 'Aman';
-  const tissueStatusKeseluruhan = isAnyTissueCritical ? 'HAMPIR HABIS' : 'Tersedia';
+  const isAnySoapCritical = soapEnabled && isSoapCritical(soap);
+  const isAnyTissueCritical =
+    tissueEnabled &&
+    ((normalizedSensorConfig.tisu1 && tissue.tisu1.status === 'Habis') ||
+      (normalizedSensorConfig.tisu2 && tissue.tisu2.status === 'Habis'));
+
+  const soapStatusKeseluruhan = soapEnabled ? (isAnySoapCritical ? 'HAMPIR HABIS' : 'Aman') : 'Dinonaktifkan';
+  const tissueStatusKeseluruhan = tissueEnabled ? (isAnyTissueCritical ? 'HAMPIR HABIS' : 'Tersedia') : 'Dinonaktifkan';
 
   Object.entries(petugas).forEach(([chatID, assignment]) => {
     if (assignment.lantai !== lantai) {
@@ -1733,11 +1816,40 @@ function sendTelegramAlert(
 
   const formatDigitalValue = (value: number): string => (value === -1 || !Number.isFinite(value) ? 'N/A' : String(value));
 
+    const enabledSoapSlots = (
+      [
+        ['S1', soap.sabun1, normalizedSensorConfig.sabun1],
+        ['S2', soap.sabun2, normalizedSensorConfig.sabun2],
+        ['S3', soap.sabun3, normalizedSensorConfig.sabun3]
+      ] as Array<[string, SoapSlot, boolean]>
+    ).filter(([, , enabled]) => enabled);
+
+    const enabledTissueSlots = (
+      [
+        ['T1', tissue.tisu1, normalizedSensorConfig.tisu1],
+        ['T2', tissue.tisu2, normalizedSensorConfig.tisu2]
+      ] as Array<[string, TissueSlot, boolean]>
+    ).filter(([, , enabled]) => enabled);
+
+    const soapSlotText =
+      enabledSoapSlots.length > 0
+        ? enabledSoapSlots.map(([label, slot]) => `${label}: ${slot.status}/${formatSoapDistance(slot)}`).join(', ')
+        : 'Dinonaktifkan';
+
+    const tissueSlotText =
+      enabledTissueSlots.length > 0
+        ? enabledTissueSlots.map(([label, slot]) => `${label}: ${slot.status}/${formatDigitalValue(slot.digital)}`).join(', ')
+        : 'Dinonaktifkan';
+
     const statusDetails = [
-      `Bau: ${amonia.status} (${Number.isFinite(amonia.ppm) ? `${amonia.ppm} ppm` : 'Data tidak ada'})`,
-      `Genangan Air: ${water.status} (digital: ${formatDigitalValue(water.digital)})`,
-      `Sabun: ${soapStatusKeseluruhan} (S1: ${soap.sabun1.status}/${formatSoapDistance(soap.sabun1)}, S2: ${soap.sabun2.status}/${formatSoapDistance(soap.sabun2)}, S3: ${soap.sabun3.status}/${formatSoapDistance(soap.sabun3)})`,
-      `Tisu: ${tissueStatusKeseluruhan} (T1: ${tissue.tisu1.status}/${formatDigitalValue(tissue.tisu1.digital)}, T2: ${tissue.tisu2.status}/${formatDigitalValue(tissue.tisu2.digital)})`
+      ammoniaEnabled
+        ? `Bau: ${amonia.status} (${Number.isFinite(amonia.ppm) ? `${amonia.ppm} ppm` : 'Data tidak ada'})`
+        : 'Bau: Dinonaktifkan',
+      waterEnabled
+        ? `Genangan Air: ${water.status} (digital: ${formatDigitalValue(water.digital)})`
+        : 'Genangan Air: Dinonaktifkan',
+      `Sabun: ${soapStatusKeseluruhan}${soapSlotText ? ` (${soapSlotText})` : ''}`,
+      `Tisu: ${tissueStatusKeseluruhan}${tissueSlotText ? ` (${tissueSlotText})` : ''}`
     ].join('\n');
 
     const requestSuffix = context.requestId ? `\nRequest ID: ${context.requestId}` : '';
@@ -1805,6 +1917,11 @@ async function bootstrap(): Promise<void> {
   try {
     const storedConfig = await configRepository.get();
     config = deriveConfig(storedConfig ?? DEFAULT_CONFIG_BASE);
+
+    const storedSettings = await deviceSettingsRepository.list();
+    Object.entries(storedSettings).forEach(([deviceId, sensorConfig]) => {
+      deviceSensorSettings[deviceId] = normalizeSensorConfig(sensorConfig);
+    });
 
     const subscribers = await subscriberRepository.list();
     petugas = {};
