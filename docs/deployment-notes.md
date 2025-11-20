@@ -34,3 +34,15 @@
 ### Follow-up
 - Certbot renewals rely on the Cloudflare token; rotate it by updating the credentials file and re-running `certbot renew --dry-run`.
 - PM2 logs live under `/home/deploy/.pm2/logs/`; use `pm2 logs <name>` for troubleshooting.
+
+### 2025-11-20 Release & Hotfix (DeviceSettings + UI rebuild)
+- Issue: backend crashed on start with `PrismaClientKnownRequestError P2021` because the new `DeviceSettings` table was not migrated; frontend build missed `VITE_API_BASE_URL`, so `/api/login` failed with “Tidak dapat terhubung ke server.”
+- Fix steps:
+  - Add the missing migration `backend/prisma/migrations/0005_add_device_settings` and run `cd backend && set -a && source .env.production && set +a && npx prisma migrate deploy` as the `deploy` user.
+  - Verify `.env.production` still sets `AUTH_SECRET`, `DATABASE_URL`, `API_KEYS_*`, `CORS_ALLOWED_ORIGINS`, and `REQUIRE_CLOUDFLARE_AUTH`.
+  - Rebuild backend `cd backend && npm run build`.
+  - Rebuild frontend `cd frontend && npm run build` (uses `.env.production` for API base URL).
+  - Restart PM2 apps under deploy: `PM2_HOME=/home/deploy/.pm2 pm2 restart toilet-api --update-env` and `pm2 restart toilet-app`.
+- Post-checks:
+  - `tail -f /home/deploy/.pm2/logs/toilet-api-out-0.log` to see `/data` posts and `Server is running`.
+  - UI login works at `https://toilet-app.muhamadfikri.com` using the supervisor account after the rebuild.
