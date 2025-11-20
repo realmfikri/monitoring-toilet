@@ -316,7 +316,23 @@ export default function App() {
 
     let websocket: WebSocket | null = null;
     let reconnectTimeoutId: number | null = null;
+    let pollingIntervalId: number | null = null;
     let shouldReconnect = true;
+
+    const stopPollingLatestData = () => {
+      if (pollingIntervalId !== null) {
+        window.clearInterval(pollingIntervalId);
+        pollingIntervalId = null;
+      }
+    };
+
+    const startPollingLatestData = () => {
+      if (pollingIntervalId === null) {
+        pollingIntervalId = window.setInterval(() => {
+          void loadRealtimeData();
+        }, 5000);
+      }
+    };
 
     const connect = () => {
       if (reconnectTimeoutId !== null) {
@@ -329,6 +345,10 @@ export default function App() {
 
       const socket = new WebSocket(url.toString());
       websocket = socket;
+
+      socket.addEventListener('open', () => {
+        stopPollingLatestData();
+      });
 
       socket.addEventListener('message', event => {
         if (typeof event.data !== 'string') {
@@ -359,10 +379,12 @@ export default function App() {
             window.clearTimeout(reconnectTimeoutId);
             reconnectTimeoutId = null;
           }
+          stopPollingLatestData();
           handleUnauthorized();
           return;
         }
 
+        startPollingLatestData();
         if (shouldReconnect) {
           reconnectTimeoutId = window.setTimeout(connect, 2000);
         }
@@ -370,6 +392,7 @@ export default function App() {
 
       socket.addEventListener('error', event => {
         console.error('WebSocket error:', event);
+        startPollingLatestData();
         socket.close();
       });
     };
@@ -382,6 +405,7 @@ export default function App() {
       if (reconnectTimeoutId !== null) {
         window.clearTimeout(reconnectTimeoutId);
       }
+      stopPollingLatestData();
       websocket?.close();
     };
   }, [token, loadRealtimeData, handleUnauthorized]);
