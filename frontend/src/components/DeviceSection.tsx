@@ -2,7 +2,11 @@ import { ReactNode, useCallback, useMemo, useState } from 'react';
 import { FaPumpSoap, FaToiletPaper, FaWater, FaWind } from 'react-icons/fa6';
 import {
   AmmoniaSensorData,
+  DEFAULT_SENSOR_CONFIG,
+  DeviceSensorConfig,
   LatestDeviceSnapshot,
+  SensorKey,
+  SENSOR_KEYS,
   SoapSensorData,
   TissueSensorData,
   WaterSensorData
@@ -16,6 +20,10 @@ interface DeviceSectionProps {
   displayName?: string | null;
   canRename?: boolean;
   onRename?: (deviceId: string, newName: string | null) => Promise<void>;
+  sensorConfig?: DeviceSensorConfig;
+  canManageSensors?: boolean;
+  onLoadSensorSettings?: () => Promise<DeviceSensorConfig>;
+  onSaveSensorSettings?: (config: DeviceSensorConfig) => Promise<void>;
   onLoadMoreHistory?: () => void;
   hasMoreHistory?: boolean;
   isLoadingHistory?: boolean;
@@ -118,13 +126,22 @@ export default function DeviceSection({
   displayName: displayNameProp,
   canRename = false,
   onRename,
+  sensorConfig,
+  canManageSensors = false,
+  onLoadSensorSettings,
+  onSaveSensorSettings,
   onLoadMoreHistory,
   hasMoreHistory = false,
   isLoadingHistory = false
 }: DeviceSectionProps) {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isSensorModalOpen, setIsSensorModalOpen] = useState(false);
+  const [sensorConfigDraft, setSensorConfigDraft] = useState<DeviceSensorConfig | null>(null);
+  const [sensorConfigError, setSensorConfigError] = useState<string | null>(null);
+  const [isSavingSensors, setIsSavingSensors] = useState(false);
   const formattedDeviceId = formatDeviceDisplayId(deviceId);
   const effectiveDisplayName = (displayNameProp ?? data?.displayName ?? null) ?? formattedDeviceId;
+  const effectiveSensorConfig = sensorConfig ?? DEFAULT_SENSOR_CONFIG;
 
   const realtime = useMemo(() => {
     if (!data) {
@@ -140,13 +157,13 @@ export default function DeviceSection({
       water,
       soap,
       tissue,
-      soapSummary: aggregateSoapStatus(soap),
-      tissueSummary: aggregateTissueStatus(tissue),
+      soapSummary: aggregateSoapStatus(soap, effectiveSensorConfig),
+      tissueSummary: aggregateTissueStatus(tissue, effectiveSensorConfig),
       timestamp: new Date(data.timestamp).toLocaleString(),
       espStatusText: data.espStatus === 'active' ? 'Aktif' : 'Tidak Aktif',
       espStatus: data.espStatus === 'active' ? 'active' : 'inactive'
     };
-  }, [data]);
+  }, [data, effectiveSensorConfig]);
 
   const historyRows = useMemo(() => history, [history]);
 
@@ -177,75 +194,218 @@ export default function DeviceSection({
     setIsHistoryOpen(prev => !prev);
   }, []);
 
+  const handleManageSensorsClick = useCallback(async () => {
+    if (!canManageSensors || !onSaveSensorSettings) {
+      return;
+    }
+
+    setSensorConfigError(null);
+
+    try {
+      const latestConfig = (onLoadSensorSettings ? await onLoadSensorSettings() : null) ?? effectiveSensorConfig;
+      setSensorConfigDraft(latestConfig);
+      setIsSensorModalOpen(true);
+    } catch (error) {
+      console.error('Error loading sensor settings:', error);
+      setSensorConfigError('Gagal memuat pengaturan sensor.');
+    }
+  }, [canManageSensors, onLoadSensorSettings, onSaveSensorSettings, effectiveSensorConfig]);
+
+  const handleCloseSensorModal = useCallback(() => {
+    setIsSensorModalOpen(false);
+    setSensorConfigError(null);
+  }, []);
+
+  const handleToggleSensor = useCallback(
+    (key: SensorKey) => {
+      setSensorConfigDraft(prev => {
+        const base = prev ?? effectiveSensorConfig;
+        return { ...base, [key]: !base[key] };
+      });
+    },
+    [effectiveSensorConfig]
+  );
+
+  const handleSaveSensors = useCallback(async () => {
+    if (!sensorConfigDraft || !onSaveSensorSettings) {
+      return;
+    }
+
+    setIsSavingSensors(true);
+    setSensorConfigError(null);
+
+    try {
+      await onSaveSensorSettings(sensorConfigDraft);
+      setIsSensorModalOpen(false);
+    } catch (error) {
+      console.error('Error saving sensor settings:', error);
+      setSensorConfigError('Gagal menyimpan pengaturan sensor.');
+    } finally {
+      setIsSavingSensors(false);
+    }
+  }, [sensorConfigDraft, onSaveSensorSettings]);
+
+  const soapEnabled = hasEnabledSoap(effectiveSensorConfig);
+  const tissueEnabled = hasEnabledTissue(effectiveSensorConfig);
+  const activeSensorConfig = sensorConfigDraft ?? effectiveSensorConfig;
+
+  const renderSensorCard = useCallback(
+    (enabled: boolean, card: ReactNode, title: string) =>
+      enabled ? (
+        card
+      ) : (
+        <div className="sensor-card sensor-card--disabled">
+          <div className="sensor-card__title-row">
+            <h3>{title}</h3>
+          </div>
+          <p className="sensor-card__disabled-label">Sensor dinonaktifkan</p>
+        </div>
+      ),
+    []
+  );
+
   const header = (
     <div className="device-header">
-      <div className="device-header__title">
-        <h2>{effectiveDisplayName}</h2>
-        {canRename && onRename ? (
-          <button type="button" className="renameButton" onClick={handleRenameClick}>
-            Ganti Nama
-          </button>
+        <div className="device-header__title">
+          <h2>{effectiveDisplayName}</h2>
+          {canRename && onRename ? (
+            <button type="button" className="renameButton" onClick={handleRenameClick}>
+              Ganti Nama
+            </button>
+          ) : null}
+          {canManageSensors && onSaveSensorSettings ? (
+            <button type="button" className="renameButton" onClick={handleManageSensorsClick}>
+              Kelola Sensor
+            </button>
+          ) : null}
+        </div>
+        {realtime ? (
+          <StatusBadge status={realtime.espStatus} label={`ESP ${realtime.espStatusText}`} />
         ) : null}
       </div>
-      {realtime ? (
-        <StatusBadge status={realtime.espStatus} label={`ESP ${realtime.espStatusText}`} />
-      ) : null}
-    </div>
   );
 
   return (
     <section className="device-section-container" data-device-id={deviceId}>
       {realtime ? (
-        <div className="realtime-content">
-          {header}
-          <div className="top-row">
-          <SensorCard
-            title="Amonia"
-            icon={<FaWind />}
-            iconClassName="sensor-card__icon--ammonia"
-            severity={getAmoniaSeverity(realtime.amonia.score)}
-            stats={[
-              { label: 'NH₃', value: formatPpm(realtime.amonia.ppm) },
-                { label: 'Skor Bau', value: formatScore(realtime.amonia.score) }
-              ]}
-              details={[`Interpretasi: ${realtime.amonia.status || 'Data tidak ada'}`]}
-            />
-          <SensorCard
-            title="Genangan Air"
-            icon={<FaWater />}
-            iconClassName="sensor-card__icon--water"
-            severity={realtime.water.status.toLowerCase().includes('terdeteksi') ? 'critical' : 'normal'}
-            stats={[{ label: 'Nilai Digital', value: formatDigital(realtime.water.digital) }]}
-            details={[`Status: ${realtime.water.status || 'Data tidak ada'}`]}
-          />
-          <SensorCard
-            title={`Tisu (${realtime.tissueSummary.cardLabel})`}
-            icon={<FaToiletPaper />}
-            iconClassName="sensor-card__icon--tissue"
-            severity={realtime.tissueSummary.critical ? 'critical' : 'normal'}
-            stats={[{ label: 'Slot', value: realtime.tissueSummary.cardLabel }]}
-            details={realtime.tissueSummary.details}
-          />
-          <SensorCard
-            title={`Sabun (${realtime.soapSummary.cardLabel})`}
-            icon={<FaPumpSoap />}
-            iconClassName="sensor-card__icon--soap"
-            severity={realtime.soapSummary.critical ? 'critical' : 'normal'}
-            stats={[{ label: 'Dispenser', value: realtime.soapSummary.cardLabel }]}
-            details={realtime.soapSummary.details}
-            />
+          <div className="realtime-content">
+            {header}
+            <div className="top-row">
+              {renderSensorCard(
+                effectiveSensorConfig.amonia,
+                (
+                  <SensorCard
+                    title="Amonia"
+                    icon={<FaWind />}
+                    iconClassName="sensor-card__icon--ammonia"
+                    severity={getAmoniaSeverity(realtime.amonia.score)}
+                    stats={[
+                      { label: 'NH₃', value: formatPpm(realtime.amonia.ppm) },
+                      { label: 'Skor Bau', value: formatScore(realtime.amonia.score) }
+                    ]}
+                    details={[`Interpretasi: ${realtime.amonia.status || 'Data tidak ada'}`]}
+                  />
+                ),
+                'Amonia'
+              )}
+              {renderSensorCard(
+                effectiveSensorConfig.water,
+                (
+                  <SensorCard
+                    title="Genangan Air"
+                    icon={<FaWater />}
+                    iconClassName="sensor-card__icon--water"
+                    severity={realtime.water.status.toLowerCase().includes('terdeteksi') ? 'critical' : 'normal'}
+                    stats={[{ label: 'Nilai Digital', value: formatDigital(realtime.water.digital) }]}
+                    details={[`Status: ${realtime.water.status || 'Data tidak ada'}`]}
+                  />
+                ),
+                'Genangan Air'
+              )}
+              {renderSensorCard(
+                tissueEnabled,
+                (
+                  <SensorCard
+                    title={`Tisu (${realtime.tissueSummary.cardLabel})`}
+                    icon={<FaToiletPaper />}
+                    iconClassName="sensor-card__icon--tissue"
+                    severity={realtime.tissueSummary.critical ? 'critical' : 'normal'}
+                    stats={[{ label: 'Slot', value: realtime.tissueSummary.cardLabel }]}
+                    details={realtime.tissueSummary.details}
+                  />
+                ),
+                'Tisu'
+              )}
+              {renderSensorCard(
+                soapEnabled,
+                (
+                  <SensorCard
+                    title={`Sabun (${realtime.soapSummary.cardLabel})`}
+                    icon={<FaPumpSoap />}
+                    iconClassName="sensor-card__icon--soap"
+                    severity={realtime.soapSummary.critical ? 'critical' : 'normal'}
+                    stats={[{ label: 'Dispenser', value: realtime.soapSummary.cardLabel }]}
+                    details={realtime.soapSummary.details}
+                  />
+                ),
+                'Sabun'
+              )}
+            </div>
           </div>
-        </div>
-      ) : (
-        <div className="realtime-content">
-          {header}
-          <p>Data real-time belum tersedia.</p>
-        </div>
-      )}
+        ) : (
+          <div className="realtime-content">
+            {header}
+            <p>Data real-time belum tersedia.</p>
+          </div>
+        )}
 
-      <div className="history-toggle-bar">
-        <button
-          type="button"
+        {isSensorModalOpen && (
+          <div className="modal-backdrop">
+            <div className="modal">
+              <div className="modal__header">
+                <h3>Pengaturan Sensor</h3>
+                <button type="button" className="modal__close" onClick={handleCloseSensorModal}>
+                  ✕
+                </button>
+              </div>
+              <div className="modal__body">
+                {SENSOR_KEYS.map(key => (
+                  <label key={key} className="sensor-toggle">
+                    <input
+                      type="checkbox"
+                      checked={activeSensorConfig[key]}
+                      onChange={() => handleToggleSensor(key)}
+                    />
+                    <span>{getSensorLabel(key)}</span>
+                  </label>
+                ))}
+                {sensorConfigError ? <p className="modal__error">{sensorConfigError}</p> : null}
+              </div>
+              <div className="modal__footer">
+                <button
+                  type="button"
+                  className="renameButton"
+                  onClick={handleSaveSensors}
+                  disabled={isSavingSensors}
+                >
+                  {isSavingSensors ? 'Menyimpan...' : 'Simpan'}
+                </button>
+                <button
+                  type="button"
+                  className="secondaryButton"
+                  onClick={handleCloseSensorModal}
+                  disabled={isSavingSensors}
+                >
+                  Batal
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="history-toggle-bar">
+          <button
+            type="button"
           className={`drawer-toggle ${isHistoryOpen ? 'open' : ''}`}
           onClick={toggleHistoryDrawer}
         >
@@ -280,7 +440,7 @@ export default function DeviceSection({
                 ) : (
                   historyRows.map((snapshot, index) => {
                     try {
-                      const summary = interpretSnapshot(snapshot);
+                      const summary = interpretSnapshot(snapshot, effectiveSensorConfig);
                       return (
                         <tr key={`${snapshot.timestamp}-${index}`}>
                           <td>{new Date(snapshot.timestamp).toLocaleString()}</td>
@@ -322,7 +482,7 @@ export default function DeviceSection({
   );
 }
 
-function interpretSnapshot(snapshot: LatestDeviceSnapshot) {
+function interpretSnapshot(snapshot: LatestDeviceSnapshot, sensorConfig: DeviceSensorConfig = DEFAULT_SENSOR_CONFIG) {
   const amonia = safeParse<AmmoniaSensorData>(snapshot.amonia, DEFAULT_AMMONIA);
   const water = safeParse<WaterSensorData>(snapshot.waterPuddleJson, DEFAULT_WATER);
   const soap = safeParse<SoapSensorData>(snapshot.sabun, DEFAULT_SOAP);
@@ -331,8 +491,8 @@ function interpretSnapshot(snapshot: LatestDeviceSnapshot) {
   return {
     amonia,
     water,
-    soapSummary: aggregateSoapStatus(soap),
-    tissueSummary: aggregateTissueStatus(tissue)
+    soapSummary: aggregateSoapStatus(soap, sensorConfig),
+    tissueSummary: aggregateTissueStatus(tissue, sensorConfig)
   };
 }
 
@@ -340,35 +500,67 @@ function formatDeviceDisplayId(deviceId: string): string {
   return deviceId.toUpperCase().replace(/-/g, ' ');
 }
 
-function aggregateSoapStatus(soap: SoapSensorData): AggregatedSoapStatus {
-  const statuses = [soap.sabun1.status, soap.sabun2.status, soap.sabun3.status].map(getSafeStatus);
-  const distances = [soap.sabun1.distance, soap.sabun2.distance, soap.sabun3.distance];
+function aggregateSoapStatus(soap: SoapSensorData, sensorConfig: DeviceSensorConfig): AggregatedSoapStatus {
+  const enabledSlots = [
+    { label: 'S1', slot: soap.sabun1, enabled: sensorConfig.sabun1 },
+    { label: 'S2', slot: soap.sabun2, enabled: sensorConfig.sabun2 },
+    { label: 'S3', slot: soap.sabun3, enabled: sensorConfig.sabun3 }
+  ].filter(entry => entry.enabled);
+
+  if (enabledSlots.length === 0) {
+    return {
+      cardLabel: 'Dinonaktifkan',
+      historyLabel: 'Dinonaktifkan',
+      critical: false,
+      details: ['Semua sensor sabun dinonaktifkan']
+    };
+  }
+
+  const statuses = enabledSlots.map(entry => getSafeStatus(entry.slot.status));
+  const distances = enabledSlots.map(entry => entry.slot.distance);
   const allUnavailable = distances.every(distance => typeof distance === 'number' && distance === -1);
   const critical = statuses.includes('Habis');
 
   const cardLabel = allUnavailable ? 'Data tidak ada' : critical ? 'Hampir Habis!' : 'Aman';
   const historyLabel = allUnavailable ? 'Data tidak ada' : critical ? 'Hampir Habis' : 'Aman';
 
-  const details = [
-    `S1: ${formatDistance(soap.sabun1.distance)}`,
-    `S2: ${formatDistance(soap.sabun2.distance)}`,
-    `S3: ${formatDistance(soap.sabun3.distance)}`
-  ];
+  const details = enabledSlots.map(entry => `${entry.label}: ${formatDistance(entry.slot.distance)}`);
 
   return { cardLabel, historyLabel, critical, details };
 }
 
-function aggregateTissueStatus(tissue: TissueSensorData): AggregatedTissueStatus {
-  const slots = [tissue.tisu1, tissue.tisu2];
-  const statuses = slots.map(slot => getSafeStatus(slot.status));
+function aggregateTissueStatus(tissue: TissueSensorData, sensorConfig: DeviceSensorConfig): AggregatedTissueStatus {
+  const slots = [
+    { label: 'T1', slot: tissue.tisu1, enabled: sensorConfig.tisu1 },
+    { label: 'T2', slot: tissue.tisu2, enabled: sensorConfig.tisu2 }
+  ].filter(entry => entry.enabled);
+
+  if (slots.length === 0) {
+    return {
+      cardLabel: 'Dinonaktifkan',
+      historyLabel: 'Dinonaktifkan',
+      critical: false,
+      details: ['Semua sensor tisu dinonaktifkan']
+    };
+  }
+
+  const statuses = slots.map(entry => getSafeStatus(entry.slot.status));
   const unavailable = statuses.every(status => status === 'Data tidak ada');
   const critical = statuses.includes('Habis');
 
   const cardLabel = unavailable ? 'Data tidak ada' : critical ? 'Habis!' : 'Tersedia';
   const historyLabel = unavailable ? 'Data tidak ada' : critical ? 'Habis' : 'Tersedia';
-  const details = slots.map((slot, index) => `T${index + 1}: ${statuses[index]} (${formatDigital(slot.digital)})`);
+  const details = slots.map(entry => `${entry.label}: ${getSafeStatus(entry.slot.status)} (${formatDigital(entry.slot.digital)})`);
 
   return { cardLabel, historyLabel, critical, details };
+}
+
+function hasEnabledSoap(config: DeviceSensorConfig): boolean {
+  return config.sabun1 || config.sabun2 || config.sabun3;
+}
+
+function hasEnabledTissue(config: DeviceSensorConfig): boolean {
+  return config.tisu1 || config.tisu2;
 }
 
 function safeParse<T>(raw: string | undefined, fallback: T): T {
@@ -388,6 +580,20 @@ function getSafeStatus(status: string | undefined): string {
     return 'Data tidak ada';
   }
   return status;
+}
+
+function getSensorLabel(key: SensorKey): string {
+  const labels: Record<SensorKey, string> = {
+    amonia: 'Amonia',
+    water: 'Genangan Air',
+    sabun1: 'Sabun 1',
+    sabun2: 'Sabun 2',
+    sabun3: 'Sabun 3',
+    tisu1: 'Tisu 1',
+    tisu2: 'Tisu 2'
+  };
+
+  return labels[key] ?? key;
 }
 
 function formatDistance(distance: number | undefined): string {

@@ -7,9 +7,6 @@ export interface Config {
   historicalIntervalMinutes: number;
   maxReminders: number;
   reminderIntervalMinutes: number;
-  soapEmptyThresholdCm: number;
-  tissueEmptyValue: number;
-  ammoniaLimits: AmmoniaLimitsConfig;
 }
 
 export type EspStatus = 'active' | 'inactive';
@@ -24,6 +21,7 @@ export interface LatestDeviceSnapshot {
   timestamp: string;
   espStatus: EspStatus;
   lastActive: number;
+  sensorConfig?: DeviceSensorConfig;
 }
 
 export interface AmmoniaSensorData {
@@ -60,6 +58,24 @@ export interface TissueSensorSlot {
 
 export type LatestDataMap = Record<string, LatestDeviceSnapshot>;
 export type HistoryDataMap = Record<string, LatestDeviceSnapshot[]>;
+
+export const SENSOR_KEYS = ['amonia', 'water', 'sabun1', 'sabun2', 'sabun3', 'tisu1', 'tisu2'] as const;
+export type SensorKey = (typeof SENSOR_KEYS)[number];
+export type DeviceSensorConfig = Record<SensorKey, boolean>;
+export const DEFAULT_SENSOR_CONFIG: DeviceSensorConfig = {
+  amonia: true,
+  water: true,
+  sabun1: true,
+  sabun2: true,
+  sabun3: true,
+  tisu1: true,
+  tisu2: true
+};
+
+export interface DeviceSettingsResponse {
+  deviceId: string;
+  sensorConfig: DeviceSensorConfig;
+}
 
 export interface DeviceHistoryResponse {
   deviceId: string;
