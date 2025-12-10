@@ -59,7 +59,7 @@ interface SensorCardStat {
 
 interface SensorCardProps {
   title: string;
-  stats: SensorCardStat[];
+  stats?: SensorCardStat[];
   severity?: SensorSeverity;
   details?: string[];
   icon?: ReactNode;
@@ -75,7 +75,7 @@ const StatusBadge = ({ status, label }: StatusBadgeProps) => (
 
 const SensorCard = ({
   title,
-  stats,
+  stats = [],
   severity = 'normal',
   details = [],
   icon,
@@ -88,14 +88,16 @@ const SensorCard = ({
         <div className={`sensor-card__icon ${iconClassName ?? ''}`.trim()}>{icon}</div>
       ) : null}
     </div>
-    <div className="sensor-card__stats">
-      {stats.map(stat => (
-        <div className="sensor-card__stat" key={stat.label}>
-          <span className="sensor-card__value">{stat.value}</span>
-          <span className="sensor-card__label">{stat.label.toUpperCase()}</span>
-        </div>
-      ))}
-    </div>
+    {stats.length > 0 ? (
+      <div className="sensor-card__stats">
+        {stats.map(stat => (
+          <div className="sensor-card__stat" key={stat.label}>
+            <span className="sensor-card__value">{stat.value}</span>
+            <span className="sensor-card__label">{stat.label.toUpperCase()}</span>
+          </div>
+        ))}
+      </div>
+    ) : null}
     {details.length > 0 ? (
       <ul className="sensor-card__details">
         {details.map(detail => (
@@ -316,7 +318,6 @@ export default function DeviceSection({
                     icon={<FaWater />}
                     iconClassName="sensor-card__icon--water"
                     severity={realtime.water.status.toLowerCase().includes('terdeteksi') ? 'critical' : 'normal'}
-                    stats={[{ label: 'Nilai Digital', value: formatDigital(realtime.water.digital) }]}
                     details={[`Status: ${realtime.water.status || 'Data tidak ada'}`]}
                   />
                 ),
@@ -612,7 +613,7 @@ function formatDigital(value: number | undefined): string {
 
 function formatPpm(ppm: number | undefined): string {
   if (typeof ppm === 'number' && Number.isFinite(ppm)) {
-    return `${ppm} ppm`;
+    return `${ppm.toFixed(3)} ppm`;
   }
   return 'Data tidak ada';
 }
@@ -626,8 +627,7 @@ function formatScore(score: number | undefined): string {
 
 function formatWaterStatus(water: WaterSensorData): string {
   const statusText = water.status || 'Data tidak ada';
-  const digitalText = formatDigital(water.digital);
-  return digitalText === 'Data tidak ada' ? statusText : `${statusText} (${digitalText})`;
+  return statusText;
 }
 
 function getAmoniaSeverity(score: number | undefined): SensorSeverity {
