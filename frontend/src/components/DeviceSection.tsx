@@ -632,10 +632,10 @@ function formatWaterStatus(water: WaterSensorData): string {
 
 function getAmoniaSeverity(score: number | undefined): SensorSeverity {
   if (typeof score === 'number' && Number.isFinite(score)) {
-    if (score >= 4) {
+    if (score >= 3) {
       return 'critical';
     }
-    if (score >= 3) {
+    if (score >= 2) {
       return 'warning';
     }
   }

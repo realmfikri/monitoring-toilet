@@ -49,11 +49,6 @@ type EspStatus = 'active' | 'inactive';
 type SoapStatus = 'safe' | 'pending' | 'critical';
 type AlertType = 'accident_new' | 'accident_repeat' | 'recovery' | 'routine';
 
-interface AmmoniaLimitsConfig {
-  goodMax: number;
-  warningMax: number;
-}
-
 interface ConfigBase {
   historicalIntervalMinutes: number;
   maxReminders: number;
@@ -191,7 +186,10 @@ const DEFAULT_SENSOR_CONFIG: DeviceSensorConfig = {
 
 const SOAP_EMPTY_THRESHOLD_CM = 10;
 const TISSUE_EMPTY_VALUE = 0;
-const AMMONIA_LIMITS: AmmoniaLimitsConfig = { goodMax: 1.5, warningMax: 3 };
+const AMMONIA_SCORE_INTERCEPT = -32.6821;
+const AMMONIA_SCORE_SLOPE = 29.8214;
+const AMMONIA_MIN_SCORE = 1;
+const AMMONIA_MAX_SCORE = 3;
 
 const SOAP_DEBOUNCE_MS = 5000;
 const ESP_INACTIVE_THRESHOLD_MS = 30000;
@@ -1353,7 +1351,7 @@ function normalizeSensorPayload(payload: RawSensorPayload, logger: Logger): Norm
 
 function computeSensorSnapshot(payload: NormalizedSensorPayload): ComputedSensorSnapshot {
   return {
-    amonia: computeAmmoniaStatus(payload.amonia, AMMONIA_LIMITS),
+    amonia: computeAmmoniaStatus(payload.amonia),
     waterPuddle: computeWaterStatus(payload.waterPuddleJson),
     sabun: computeSoapStatus(payload.sabun, SOAP_EMPTY_THRESHOLD_CM),
     tisu: computeTissueStatus(payload.tisu, TISSUE_EMPTY_VALUE)
@@ -1457,24 +1455,19 @@ function normalizeTissueSlot(value: unknown, logger: Logger): RawTissueSlotPaylo
   return { digital: digital === null ? null : normalizeDigitalValue(digital) };
 }
 
-function computeAmmoniaStatus(payload: RawAmmoniaPayload, limits: AmmoniaLimitsConfig): AmmoniaSensorData {
+function deriveAmmoniaScore(ppm: number): number {
+  const estimatedScore = Math.round(AMMONIA_SCORE_INTERCEPT + AMMONIA_SCORE_SLOPE * ppm);
+  return Math.max(AMMONIA_MIN_SCORE, Math.min(AMMONIA_MAX_SCORE, estimatedScore));
+}
+
+function computeAmmoniaStatus(payload: RawAmmoniaPayload): AmmoniaSensorData {
   if (payload.ppm === null || !Number.isFinite(payload.ppm)) {
     return { ppm: null, score: null, status: 'Data tidak ada' };
   }
 
   const ppm = Math.max(payload.ppm, 0);
-  let score = 1;
-  let status = 'Bagus';
-
-  if (ppm > limits.goodMax) {
-    score = 2;
-    status = 'Normal';
-  }
-
-  if (ppm > limits.warningMax) {
-    score = 3;
-    status = 'Kritis';
-  }
+  const score = deriveAmmoniaScore(ppm);
+  const status = score === 1 ? 'Bagus' : score === 2 ? 'Normal' : 'Kritis';
 
   return { ppm, score, status };
 }
