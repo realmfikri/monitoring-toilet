@@ -1,8 +1,3 @@
-export interface AmmoniaLimitsConfig {
-  goodMax: number;
-  warningMax: number;
-}
-
 export interface Config {
   historicalIntervalMinutes: number;
   maxReminders: number;
