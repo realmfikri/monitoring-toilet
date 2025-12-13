@@ -9,8 +9,6 @@
 #include <FS.h>
 #include <SPIFFS.h>
 #include <cstring>
-#include "esp_wifi.h"
-#include "esp_wpa2.h"
 
 // Sertakan file header untuk display (dengan I2C kustom dan styling minimalis)
 #include "display.h" 
@@ -37,9 +35,6 @@ const char* configFilePath = "/config.json";
 char tempDeviceId[40] = {0};
 char apiBaseUrl[128] = "https://toilet-api.muhamadfikri.com";
 char apiKey[80] = {0};
-char eapSsid[64] = {0};
-char eapIdentity[64] = {0};
-char eapPassword[64] = {0};
 
 bool shouldSaveConfig = false;
 bool configLoadedFromFS = false;
@@ -76,9 +71,6 @@ vepuoxtGzi4CZ68zJpiq1UvSqTbFJjtbD4seiMHl
 WiFiManagerParameter custom_device_id("deviceid", "Device ID (e.g. toilet-lantai-2)", tempDeviceId, 40);
 WiFiManagerParameter custom_api_base_url("api_base_url", "API Base URL (https://...)", apiBaseUrl, sizeof(apiBaseUrl));
 WiFiManagerParameter custom_api_key("api_key", "API Key", apiKey, sizeof(apiKey));
-WiFiManagerParameter custom_eap_ssid("eap_ssid", "Enterprise SSID (PEAP)", eapSsid, sizeof(eapSsid));
-WiFiManagerParameter custom_eap_identity("eap_identity", "Enterprise Identity/Username", eapIdentity, sizeof(eapIdentity));
-WiFiManagerParameter custom_eap_password("eap_password", "Enterprise Password", eapPassword, sizeof(eapPassword));
 
 // === PIN & Variabel Global Utama ===
 const int ledPin = 2; // LED Indikator Status
@@ -100,7 +92,6 @@ void updateLocalConfigFromParameters();
 void copyParam(char* destination, size_t length, const char* source);
 void signalErrorPattern();
 String buildApiEndpoint(const String& baseUrl);
-bool connectToEnterpriseNetwork(const char* ssid, const char* identity, const char* password, unsigned long timeoutMs);
 
 // FUNGSI CALLBACK: Dipanggil saat konfigurasi custom field disimpan
 void saveConfigCallback() {
@@ -125,9 +116,6 @@ void checkAndStartAP() {
                 wifiManager.addParameter(&custom_device_id);
                 wifiManager.addParameter(&custom_api_base_url);
                 wifiManager.addParameter(&custom_api_key);
-                wifiManager.addParameter(&custom_eap_ssid);
-                wifiManager.addParameter(&custom_eap_identity);
-                wifiManager.addParameter(&custom_eap_password);
                 wifiManager.setSaveConfigCallback(saveConfigCallback);
 
                 bool res = wifiManager.startConfigPortal(wifiSetupApName, wifiSetupApPassword);
@@ -180,17 +168,11 @@ void setup() {
             custom_device_id.setValue(tempDeviceId, sizeof(tempDeviceId));
             custom_api_base_url.setValue(apiBaseUrl, sizeof(apiBaseUrl));
             custom_api_key.setValue(apiKey, sizeof(apiKey));
-            custom_eap_ssid.setValue(eapSsid, sizeof(eapSsid));
-            custom_eap_identity.setValue(eapIdentity, sizeof(eapIdentity));
-            custom_eap_password.setValue(eapPassword, sizeof(eapPassword));
         } else {
             // Pastikan parameter memuat nilai default meski belum ada file config.
             custom_device_id.setValue(tempDeviceId, sizeof(tempDeviceId));
             custom_api_base_url.setValue(apiBaseUrl, sizeof(apiBaseUrl));
             custom_api_key.setValue(apiKey, sizeof(apiKey));
-            custom_eap_ssid.setValue(eapSsid, sizeof(eapSsid));
-            custom_eap_identity.setValue(eapIdentity, sizeof(eapIdentity));
-            custom_eap_password.setValue(eapPassword, sizeof(eapPassword));
         }
     } else {
         Serial.println("⚠️ Gagal mount SPIFFS. Konfigurasi tidak dapat dimuat.");
@@ -204,60 +186,26 @@ void setup() {
     wifiManager.addParameter(&custom_device_id);
     wifiManager.addParameter(&custom_api_base_url);
     wifiManager.addParameter(&custom_api_key);
-    wifiManager.addParameter(&custom_eap_ssid);
-    wifiManager.addParameter(&custom_eap_identity);
-    wifiManager.addParameter(&custom_eap_password);
     wifiManager.setSaveConfigCallback(saveConfigCallback);
 
     Serial.println("Menyiapkan koneksi WiFi...");
-    displayStatus("Hubungkan WiFi");
+    displayStatus("Hubungkan WiFi"); 
 
-    String enterpriseIdentity = String(custom_eap_identity.getValue());
-    enterpriseIdentity.trim();
-
-    bool connected = false;
-
-    if (enterpriseIdentity.length() > 0) {
-        String enterpriseSsid = String(custom_eap_ssid.getValue());
-        String enterprisePassword = String(custom_eap_password.getValue());
-
-        Serial.println("Mode WPA2-Enterprise terdeteksi. Mencoba koneksi PEAP...");
-        displayStatus("Konek EAP...");
-
-        connected = connectToEnterpriseNetwork(enterpriseSsid.c_str(), enterpriseIdentity.c_str(), enterprisePassword.c_str(), 20000UL);
-
-        if (!connected) {
-            Serial.println("❌ Koneksi EAP gagal. Membuka portal konfigurasi.");
-            displayStatus("EAP gagal");
-            bool res = wifiManager.startConfigPortal(wifiSetupApName, wifiSetupApPassword);
-            if (!res) {
-                Serial.println("❌ Gagal keluar dari portal konfigurasi setelah EAP gagal. Reboot.");
-                displayStatus("AP Gagal");
-                delay(2000);
-                ESP.restart();
-            }
-            connected = true; // jika portal berhasil, dianggap terhubung ke WiFi
-        }
-    } else {
-        // Mencoba koneksi otomatis untuk WPA2-Personal.
-        if (!wifiManager.autoConnect(wifiSetupApName, wifiSetupApPassword)) {
-            Serial.println("❌ Gagal konek WiFi. Menghapus kredensial dan reboot.");
-            displayStatus("Gagal Konek");
-            delay(3000);
-            wifiManager.resetSettings();
-            delay(1000);
-            ESP.restart();
-        }
-        connected = true;
+    // Mencoba koneksi otomatis.
+    if (!wifiManager.autoConnect(wifiSetupApName, wifiSetupApPassword)) {
+        Serial.println("❌ Gagal konek WiFi. Menghapus kredensial dan reboot.");
+        displayStatus("Gagal Konek"); 
+        delay(3000);
+        wifiManager.resetSettings();
+        delay(1000);
+        ESP.restart();
     }
 
-    if (connected && WiFi.status() == WL_CONNECTED) {
-        Serial.println("✅ Terhubung ke WiFi");
-        Serial.print("SSID: ");
-        Serial.println(WiFi.SSID());
-        Serial.print("IP: ");
-        Serial.println(WiFi.localIP());
-    }
+    Serial.println("✅ Terhubung ke WiFi");
+    Serial.print("SSID: ");
+    Serial.println(WiFi.SSID());
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
 
     updateLocalConfigFromParameters();
     if (!spiffsMounted) {
@@ -432,7 +380,7 @@ bool loadConfigFromFS() {
         return false;
     }
 
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<256> doc;
     DeserializationError error = deserializeJson(doc, configFile);
     configFile.close();
 
@@ -450,15 +398,6 @@ bool loadConfigFromFS() {
     if (doc.containsKey("api_key")) {
         copyParam(apiKey, sizeof(apiKey), doc["api_key"]);
     }
-    if (doc.containsKey("eap_ssid")) {
-        copyParam(eapSsid, sizeof(eapSsid), doc["eap_ssid"]);
-    }
-    if (doc.containsKey("eap_identity")) {
-        copyParam(eapIdentity, sizeof(eapIdentity), doc["eap_identity"]);
-    }
-    if (doc.containsKey("eap_password")) {
-        copyParam(eapPassword, sizeof(eapPassword), doc["eap_password"]);
-    }
 
     Serial.println("Konfigurasi dimuat dari SPIFFS.");
     return true;
@@ -470,13 +409,10 @@ bool saveConfigToFS() {
         return false;
     }
 
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<256> doc;
     doc["device_id"] = strlen(tempDeviceId) > 0 ? tempDeviceId : custom_device_id.getValue();
     doc["api_base_url"] = strlen(apiBaseUrl) > 0 ? apiBaseUrl : defaultApiBaseUrl;
     doc["api_key"] = apiKey;
-    doc["eap_ssid"] = eapSsid;
-    doc["eap_identity"] = eapIdentity;
-    doc["eap_password"] = eapPassword;
 
     File configFile = SPIFFS.open(configFilePath, "w");
     if (!configFile) {
@@ -499,9 +435,6 @@ void updateLocalConfigFromParameters() {
     copyParam(tempDeviceId, sizeof(tempDeviceId), custom_device_id.getValue());
     copyParam(apiBaseUrl, sizeof(apiBaseUrl), custom_api_base_url.getValue());
     copyParam(apiKey, sizeof(apiKey), custom_api_key.getValue());
-    copyParam(eapSsid, sizeof(eapSsid), custom_eap_ssid.getValue());
-    copyParam(eapIdentity, sizeof(eapIdentity), custom_eap_identity.getValue());
-    copyParam(eapPassword, sizeof(eapPassword), custom_eap_password.getValue());
 }
 
 void copyParam(char* destination, size_t length, const char* source) {
@@ -560,52 +493,6 @@ String buildApiEndpoint(const String& baseUrl) {
     }
 
     return sanitized + "/data";
-}
-
-bool connectToEnterpriseNetwork(const char* ssid, const char* identity, const char* password, unsigned long timeoutMs) {
-    if (!ssid || strlen(ssid) == 0 || !identity || strlen(identity) == 0) {
-        Serial.println("SSID atau identitas EAP kosong.");
-        return false;
-    }
-
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_STA);
-
-    esp_wifi_sta_wpa2_ent_clear_identity();
-    esp_wifi_sta_wpa2_ent_clear_password();
-    esp_wifi_sta_wpa2_ent_clear_username();
-
-    esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)identity, strlen(identity));
-    esp_wifi_sta_wpa2_ent_set_username((uint8_t *)identity, strlen(identity));
-    if (password && strlen(password) > 0) {
-        esp_wifi_sta_wpa2_ent_set_password((uint8_t *)password, strlen(password));
-    }
-
-    // Jangan gunakan sertifikat CA untuk memaksa koneksi tanpa verifikasi server.
-    esp_wifi_sta_wpa2_ent_set_ca_cert(nullptr, 0);
-
-    wpa2_config_t config = WPA2_CONFIG_INIT_DEFAULT();
-    esp_err_t enableStatus = esp_wifi_sta_wpa2_ent_enable(&config);
-    if (enableStatus != ESP_OK) {
-        Serial.printf("Gagal mengaktifkan WPA2-Enterprise: %d\n", enableStatus);
-        return false;
-    }
-
-    WiFi.begin(ssid);
-
-    unsigned long startAttempt = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < timeoutMs) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println();
-
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Timeout koneksi WPA2-Enterprise.");
-        return false;
-    }
-
-    return true;
 }
 
 // === Fungsi JSON Payload Sensor (Tetap Sama) ===
