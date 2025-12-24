@@ -18,8 +18,8 @@ const float RL = 4700.0;
 const float NH3_Curve[2] = {-2.3447, 0.0670};
 
 // Persamaan Regresi Likert BARU (3-Skala)
-const float REG_INTERCEPT = -32.6821428571428;
-const float REG_SLOPE = 29.8214285714285;
+const float REG_INTERCEPT = -0.805;
+const float REG_SLOPE = 1.989;
 
 // Interval Kalibrasi Tetap
 const unsigned long calibrationInterval = 2UL * 60UL * 60UL * 1000UL;
